@@ -1,0 +1,6 @@
+--- a/setup.cfg
++++ b/setup.cfg
+@@ -1,2 +1,2 @@
+ [install]
+-prefix = /opt/graphite
++prefix=/usr/share/graphite

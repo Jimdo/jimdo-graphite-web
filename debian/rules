@@ -1,0 +1,15 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+# Uncomment this to turn on verbose mode.
+#export DH_VERBOSE=1
+
+%:
+	dh --with python2,quilt $@
+
+override_dh_installdeb:
+	dh_installdeb
+	rm -rf $(DESTDIR)debian/graphite-web/usr/conf
+	rm -rf $(DESTDIR)debian/graphite-web/usr/storage
+	find -name "*.gif" -exec chmod -x {} \; 
+	find -name "*.js" -exec chmod -x {} \;
+	find -name "*.png" -exec chmod -x {} \;
