@@ -1,5 +1,5 @@
 graphite-web (0.9.9-1) unstable; urgency=low
 
-  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+  * Initial release
 
- -- buildmaster <builds@jimdo.com>  Thu, 05 Jan 2012 11:59:12 +0100
+ -- Lars Fronius <lars@jimdo.com>  Thu, 05 Jan 2012 11:59:12 +0100

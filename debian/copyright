@@ -1,28 +1,14 @@
 This work was packaged for Debian by:
 
-    buildmaster <builds@jimdo.com> on Thu, 05 Jan 2012 11:59:12 +0100
+    Lars Fronius <lars@jimdo.com> on Thu, 05 Jan 2012 11:59:12 +0100
 
 It was downloaded from:
 
-    <url://example.com>
-
-Upstream Author(s):
-
-    <put author's name and email here>
-    <likewise for another author>
-
-Copyright:
-
-    <Copyright (C) YYYY Firstname Lastname>
-    <likewise for another author>
-
-License:
-
-    <Put the license of the package here indented by 4 spaces>
+    https://launchpad.net/graphite
 
 The Debian packaging is:
 
-    Copyright (C) 2012 buildmaster <builds@jimdo.com>
+    Copyright (C) 2012 Lars Fronius <lars@jimdo.com>
 
 # Please chose a license for your packaging work. If the program you package
 # uses a mainstream license, using the same license is the safest choice.
