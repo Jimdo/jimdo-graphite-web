@@ -1,0 +1,37 @@
+#!/bin/bash -e
+
+#DEBHELPER#
+
+GRAPHITE_USER='www-data'
+
+create_new_user() {
+# creating group if he isn't already there
+    if [ -z "`getent group $GRAPHITE_USER`" ]; then
+        addgroup --quiet --system $GRAPHITE_USER
+    fi
+# creating carbon user if he isn't already there
+    if [ -z "`getent passwd $GRAPHITE_USER`" ]; then
+        echo -n "  Creating new user $GRAPHITE_USER... " >&2
+        adduser --quiet --system --no-create-home --home /usr/share/graphite --shell /bin/false \
+            --ingroup $USER --disabled-password --disabled-login \
+            --gecos "Graphite Server Account" $GRAPHITE_USER
+        echo "done." >&2
+    fi
+}
+
+update_permissions() {
+    dir="$1"
+    if [ -d "$dir" ]; then
+        [ -z "$GRAPHITE_USER" ] || chown -R "$GRAPHITE_USER" "$dir"
+        [ -z "$GRAPHITE_USER" ] || chgrp -R "$GRAPHITE_USER" "$dir"
+    fi
+}
+
+if [ -n $GRAPHITE_USER ]; then
+    create_new_user
+    for DIR in '/usr/share/graphite/storage'; do
+        if [ -n $DIR ]; then
+            update_permissions $DIR
+        fi
+    done
+fi

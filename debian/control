@@ -11,6 +11,7 @@ Vcs-Browser: https://code.launchpad.net/graphite
 
 Package: graphite-web
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, apache2 | lighttpd | httpd, python-django, python-django-tagging, python-cairo, python-whisper (>= 0.9.9)
 Description: Graphite provides real-time visualization
- Graphite provides real-time visualization and storage of numeric time-series data on an enterprise level
+  Web-Interface to carbon/whisper data storage
+  Graphite provides real-time visualization and storage of numeric time-series data on an enterprise level
