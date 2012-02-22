@@ -1,3 +1,9 @@
+graphite-web (0.9.9-2) unstable; urgency=low
+
+  * Fixes wrong import of json library
+
+ -- Lars Fronius <lars@jimdo.com>  Wed, 22 Feb 2012 14:45:23 +0100
+
 graphite-web (0.9.9-1) unstable; urgency=low
 
   * Initial release

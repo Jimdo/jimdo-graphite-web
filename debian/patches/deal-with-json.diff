@@ -1,0 +1,32 @@
+Index: graphite-web/webapp/graphite/events/views.py
+===================================================================
+--- graphite-web.orig/webapp/graphite/events/views.py	2012-01-26 13:33:28.000000000 +0100
++++ graphite-web/webapp/graphite/events/views.py	2012-02-22 14:42:06.000000000 +0100
+@@ -1,7 +1,10 @@
+ import datetime
+ import time
+ 
+-import simplejson
++try:
++  import json
++except ImportError:
++  import simplejson as json
+ 
+ from django.http import HttpResponse
+ from django.shortcuts import render_to_response, get_object_or_404
+Index: graphite-web/webapp/graphite/graphlot/views.py
+===================================================================
+--- graphite-web.orig/webapp/graphite/graphlot/views.py	2012-01-26 13:33:28.000000000 +0100
++++ graphite-web/webapp/graphite/graphlot/views.py	2012-02-22 14:42:23.000000000 +0100
+@@ -3,7 +3,10 @@
+ from django.shortcuts import render_to_response
+ from django.http import HttpResponse, Http404, HttpResponseBadRequest
+ from django.conf import settings
+-import simplejson
++try:
++  import json
++except ImportError:
++  import simplejson as json
+ 
+ from graphite.render.views import parseOptions
+ from graphite.render.evaluator import evaluateTarget
