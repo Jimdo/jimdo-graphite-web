@@ -1,8 +1,6 @@
-Index: graphite-web/webapp/graphite/render/functions.py
-===================================================================
---- graphite-web.orig/webapp/graphite/render/functions.py	2012-01-26 13:33:28.000000000 +0100
-+++ graphite-web/webapp/graphite/render/functions.py	2012-02-23 18:16:37.000000000 +0100
-@@ -594,7 +594,7 @@
+-- a/webapp/graphite/render/functions.py
++++ b/webapp/graphite/render/functions.py
+@@ -594,7 +594,8 @@
    if type(nodes) is int:
      nodes=[nodes]
    for series in seriesList:
@@ -11,4 +9,4 @@ Index: graphite-web/webapp/graphite/render/functions.py
 +    newname = ".".join([ name_without_parens.split(".")[node] for node in nodes])
      series.name = newname
    return seriesList
- 
+
