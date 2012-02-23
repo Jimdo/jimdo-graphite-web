@@ -7,7 +7,8 @@ Index: graphite-web/webapp/graphite/render/functions.py
      nodes=[nodes]
    for series in seriesList:
 -    newname = re.search('(?:.*\()?(?P<name>[\w\.]+)(?:,|\]?.*)?',series.name).groups()[0]
-+    newname = ".".join([ series.name.split(".")[node] for node in nodes])
++    name_without_parens = re.search('(?:.*\()?(?P<name>[\w\.]+)(?:,|\]?.*)?',series.name).groups()[0]
++    newname = ".".join([ name_without_parens.split(".")[node] for node in nodes])
      series.name = newname
    return seriesList
  
