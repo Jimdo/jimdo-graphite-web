@@ -1,0 +1,13 @@
+Index: graphite-web/webapp/graphite/render/functions.py
+===================================================================
+--- graphite-web.orig/webapp/graphite/render/functions.py	2012-01-26 13:33:28.000000000 +0100
++++ graphite-web/webapp/graphite/render/functions.py	2012-02-23 18:16:37.000000000 +0100
+@@ -594,7 +594,7 @@
+   if type(nodes) is int:
+     nodes=[nodes]
+   for series in seriesList:
+-    newname = re.search('(?:.*\()?(?P<name>[\w\.]+)(?:,|\]?.*)?',series.name).groups()[0]
++    newname = ".".join([ series.name.split(".")[node] for node in nodes])
+     series.name = newname
+   return seriesList
+ 
