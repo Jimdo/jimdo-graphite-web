@@ -1,3 +1,9 @@
+graphite-web (0.9.10-1) unstable; urgency=low
+
+  * Upgrade graphite-web to release 0.9.10
+
+ -- Lars Fronius <lars@jimdo.com>  Thu, 15 Jun 2012 11:58:13 +0100
+
 graphite-web (0.9.9-2.3) unstable; urgency=low
 
   * Non-maintainer upload.
