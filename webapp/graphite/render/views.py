@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 import csv
 from time import time, strftime, localtime
-from datetime import datetime, timedelta
 from random import shuffle
 from httplib import CannotSendRequest
 from urllib import urlencode
@@ -109,15 +108,6 @@ def renderView(request):
     if useCache:
       cache.set(dataKey, data, cacheTimeout)
 
-    # If data is all we needed, we're done
-    if 'pickle' in requestOptions:
-      response = HttpResponse(mimetype='application/pickle')
-      seriesInfo = [series.getInfo() for series in data]
-      pickle.dump(seriesInfo, response, protocol=-1)
-
-      log.rendering('Total pickle rendering time %.6f' % (time() - start))
-      return response
-
     format = requestOptions.get('format')
     if format == 'csv':
       response = HttpResponse(mimetype='text/csv')
@@ -158,6 +148,18 @@ def renderView(request):
       log.rendering('Total rawData rendering time %.6f' % (time() - start))
       return response
 
+    if format == 'svg':
+      graphOptions['outputFormat'] = 'svg'
+
+    if format == 'pickle':
+      response = HttpResponse(mimetype='application/pickle')
+      seriesInfo = [series.getInfo() for series in data]
+      pickle.dump(seriesInfo, response, protocol=-1)
+
+      log.rendering('Total pickle rendering time %.6f' % (time() - start))
+      return response
+
+
   # We've got the data, now to render it
   graphOptions['data'] = data
   if settings.REMOTE_RENDERING: # Rendering on other machines is faster in some situations
@@ -165,7 +167,13 @@ def renderView(request):
   else:
     image = doImageRender(requestOptions['graphClass'], graphOptions)
 
-  response = buildResponse(image)
+  useSVG = graphOptions.get('outputFormat') == 'svg'
+  if useSVG and 'jsonp' in requestOptions:
+    response = HttpResponse(
+      content="%s(%s)" % (requestOptions['jsonp'], json.dumps(image)),
+      mimetype='text/javascript')
+  else:
+    response = buildResponse(image, useSVG and 'image/svg+xml' or 'image/png')
 
   if useCache:
     cache.set(requestKey, response, cacheTimeout)
@@ -192,12 +200,10 @@ def parseOptions(request):
   requestOptions['cacheTimeout'] = int( queryParams.get('cacheTimeout', settings.DEFAULT_CACHE_DURATION) )
   requestOptions['targets'] = []
   for target in queryParams.getlist('target'):
-    if target.lower().startswith('graphite.'): #Strip leading "Graphite." as a convenience
-      target = target[9:]
     requestOptions['targets'].append(target)
 
   if 'pickle' in queryParams:
-    requestOptions['pickle'] = True
+    requestOptions['format'] = 'pickle'
   if 'rawData' in queryParams:
     requestOptions['format'] = 'raw'
   if 'format' in queryParams:
@@ -228,11 +234,11 @@ def parseOptions(request):
     if 'until' in queryParams:
       untilTime = parseATTime( queryParams['until'] )
     else:
-      untilTime = datetime.now()
+      untilTime = parseATTime('now')
     if 'from' in queryParams:
       fromTime = parseATTime( queryParams['from'] )
     else:
-      fromTime = untilTime - timedelta(days=1)
+      fromTime = parseATTime('-1d')
 
     startTime = min(fromTime, untilTime)
     endTime = max(fromTime, untilTime)
@@ -321,11 +327,21 @@ def renderMyGraphView(request,username,graphName):
     query_string = url_parts[3]
     if query_string:
       url_params = parse_qs(query_string)
+      # Remove lists so that we can do an update() on the dict
       for param, value in url_params.items():
-        if isinstance(value, list):
-          url_params[param] = value[0]
+        if isinstance(value, list) and param != 'target':
+          url_params[param] = value[-1]
       url_params.update(request_params)
-      query_string = urlencode(url_params)
+      # Handle 'target' being a list - we want duplicate &target params out of it
+      url_param_pairs = []
+      for key,val in url_params.items():
+        if isinstance(val, list):
+          for v in val:
+            url_param_pairs.append( (key,v) )
+        else:
+          url_param_pairs.append( (key,val) )
+
+      query_string = urlencode(url_param_pairs)
     url = urlunsplit(url_parts[:3] + (query_string,) + url_parts[4:])
   else:
     url = graph.url
@@ -343,8 +359,8 @@ def doImageRender(graphClass, graphOptions):
   return imageData
 
 
-def buildResponse(imageData):
-  response = HttpResponse(imageData, mimetype="image/png")
+def buildResponse(imageData, mimetype="image/png"):
+  response = HttpResponse(imageData, mimetype=mimetype)
   response['Cache-Control'] = 'no-cache'
   response['Pragma'] = 'no-cache'
   return response

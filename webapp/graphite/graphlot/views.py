@@ -3,11 +3,13 @@ import re
 from django.shortcuts import render_to_response
 from django.http import HttpResponse, Http404, HttpResponseBadRequest
 from django.conf import settings
-import simplejson
 
+from graphite.util import json
 from graphite.render.views import parseOptions
 from graphite.render.evaluator import evaluateTarget
 from graphite.storage import STORE
+from django.core.urlresolvers import get_script_prefix
+
 
 
 def graphlot_render(request):
@@ -21,8 +23,13 @@ def graphlot_render(request):
     untiltime = request.GET.get('until', "-0hour")
     fromtime = request.GET.get('from', "-24hour")
     events = request.GET.get('events', "")
-    context = dict(metric_list=metrics, fromtime=fromtime, untiltime=untiltime,
-                   events=events)
+    context = {
+      'metric_list' : metrics,
+      'fromtime' : fromtime,
+      'untiltime' : untiltime,
+      'events' : events,
+      'slash' : get_script_prefix()
+    }
     return render_to_response("graphlot.html", context)
 
 def get_data(request):
@@ -45,7 +52,7 @@ def get_data(request):
             ) for timeseries in seriesList ]
     if not result:
         raise Http404
-    return HttpResponse(simplejson.dumps(result), mimetype="application/json")
+    return HttpResponse(json.dumps(result), mimetype="application/json")
 
 
 def find_metric(request):
@@ -64,10 +71,12 @@ def find_metric(request):
 
 def header(request):
   "View for the header frame of the browser UI"
-  context = {}
-  context['user'] = request.user
-  context['profile'] = getProfile(request)
-  context['documentation_url'] = settings.DOCUMENTATION_URL
+  context = {
+    'user' : request.user,
+    'profile' : getProfile(request),
+    'documentation_url' : settings.DOCUMENTATION_URL,
+    'slash' : get_script_prefix()
+  }
   return render_to_response("browserHeader.html", context)
 
 
@@ -75,7 +84,8 @@ def browser(request):
   "View for the top-level frame of the browser UI"
   context = {
     'queryString' : request.GET.urlencode(),
-    'target' : request.GET.get('target')
+    'target' : request.GET.get('target'),
+    'slash' : get_script_prefix()
   }
   if context['queryString']:
     context['queryString'] = context['queryString'].replace('#','%23')
@@ -182,7 +192,7 @@ def myGraphLookup(request):
     no_graphs.update(leafNode)
     nodes.append(no_graphs)
 
-  return json_response(nodes)
+  return json_response(nodes, request)
 
 def userGraphLookup(request):
   "View for User Graphs navigation"
@@ -236,13 +246,19 @@ def userGraphLookup(request):
     no_graphs.update(leafNode)
     nodes.append(no_graphs)
 
-  return json_response(nodes)
+  return json_response(nodes, request)
 
 
-def json_response(nodes):
-  #json = str(nodes) #poor man's json encoder for simple types
+def json_response(nodes, request=None):
+  if request:
+    jsonp = request.REQUEST.get('jsonp', False)
+  else:
+    jsonp = False
   json_data = json.dumps(nodes)
-  response = HttpResponse(json_data,mimetype="application/json")
+  if jsonp:
+    response = HttpResponse("%s(%s)" % (jsonp, json_data),mimetype="text/javascript")
+  else:
+    response = HttpResponse(json_data,mimetype="application/json")
   response['Pragma'] = 'no-cache'
   response['Cache-Control'] = 'no-cache'
   return response

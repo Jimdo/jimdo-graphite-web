@@ -23,8 +23,14 @@ number = Group(
   (intNumber + afterNumber)
 )('number')
 
+boolean = Group(
+  CaselessKeyword("true") |
+  CaselessKeyword("false")
+)('boolean')
+
 # Function calls
 arg = Group(
+  boolean |
   number |
   aString |
   expression
@@ -40,7 +46,7 @@ call = Group(
 # Metric pattern (aka. pathExpression)
 validMetricChars = alphanums + r'''!#$%&"'*+-.:;<=>?@[\]^_`|~'''
 pathExpression = Combine(
-  Word(validMetricChars) +
+  Optional(Word(validMetricChars)) +
   Combine(
     ZeroOrMore(
       Group(

@@ -16,13 +16,13 @@ var dashboardURL;
 var refreshTask;
 var spacer;
 var justClosedGraph = false;
-var NOT_EDITABLE = ['from', 'until', 'width', 'height', 'target', 'uniq'];
+var NOT_EDITABLE = ['from', 'until', 'width', 'height', 'target', 'uniq', '_uniq'];
 
 var cookieProvider = new Ext.state.CookieProvider({
   path: "/dashboard"
 });
 
-var NAV_BAR_REGION = cookieProvider.get('navbar-region') || 'west';
+var NAV_BAR_REGION = cookieProvider.get('navbar-region') || 'north';
 
 var CONFIRM_REMOVE_ALL = cookieProvider.get('confirm-remove-all') != 'false';
 
@@ -79,7 +79,9 @@ var contextFieldStore = new Ext.data.JsonStore({
 var GraphRecord = new Ext.data.Record.create([
   {name: 'target'},
   {name: 'params', type: 'auto'},
-  {name: 'url'}
+  {name: 'url'},
+  {name: 'width', type: 'auto'},
+  {name: 'height', type: 'auto'}
 ]);
 
 var graphStore;
@@ -254,7 +256,7 @@ function initDashboard () {
       region: 'center',
       hideHeaders: true,
       loadMask: true,
-      bodyCssClass: 'terminalStyle',
+      bodyCssClass: 'metric-result',
 
       colModel: new Ext.grid.ColumnModel({
         defaults: {
@@ -268,7 +270,7 @@ function initDashboard () {
       viewConfig: {
         forceFit: true,
         rowOverCls: '',
-        bodyCssClass: 'terminalStyle',
+        bodyCssClass: 'metric-result',
         getRowClass: function(record, index) {
           var toggledClass = (
              graphStore.findExact('target', 'target=' + record.data.path) == -1
@@ -347,8 +349,8 @@ function initDashboard () {
     '<tpl for=".">',
       '<div class="graph-container">',
         '<div class="graph-overlay">',
-          '<img class="graph-img" src="{url}">',
-          '<div class="overlay-close-button" onclick="javascript: graphAreaToggle(\'{target}\'); justClosedGraph = true;">X</div>',
+          '<img class="graph-img" src="{url}" width="{width}" height="{height}">',
+          '<div class="overlay-close-button" onclick="javascript: graphStore.removeAt(\'{index}\'); updateGraphRecords(); justClosedGraph = true;">X</div>',
         '</div>',
       '</div>',
     '</tpl>',
@@ -429,7 +431,7 @@ function initDashboard () {
         }
       },
 
-      onNodeDrop: function (target, dd, e, data){ 
+      onNodeDrop: function (target, dd, e, data){
         var nodes = graphView.getNodes();
         var dropIndex = nodes.indexOf(target);
         var dragIndex = graphStore.indexOf(data.draggedRecord);
@@ -545,6 +547,21 @@ function initDashboard () {
     text: 'Graphs',
     menu: {
       items: [
+        { text: "New Graph",
+          menu: {
+            items: [
+//              { text: "Empty Graph",
+//                handler: newEmptyGraph
+//              },
+              { text: "From URL",
+                handler: newFromUrl
+              },
+              { text: "From Saved Graph",
+                handler: newFromSavedGraph
+              },
+            ]
+          }
+        },
         {
           text: "Edit Default Parameters",
           handler: editDefaultGraphParameters
@@ -696,6 +713,12 @@ function initDashboard () {
   // Load initial dashboard state if it was passed in
   if (initialState) {
     applyState(initialState);
+    navBar.collapse();
+  }
+
+  if(window.location.hash != '')
+  {
+    sendLoadRequest(window.location.hash.substr(1));
   }
 
   if (initialError) {
@@ -847,7 +870,7 @@ function metricTreeSelectorShow(pattern) {
   });
 
   try {
-    var oldRoot = Ext.getCmp('rootMetricSelectorNode')
+    var oldRoot = Ext.getCmp('rootMetricSelectorNode');
     oldRoot.destroy();
   } catch (err) { }
 
@@ -918,20 +941,70 @@ function graphAreaToggle(target, options) {
       url: '/render?' + Ext.urlEncode(urlParams)
     });
     graphStore.add([record]);
+    updateGraphRecords();
+  }
+}
+
+function importGraphUrl(targetUrl, options) {
+  var fullUrl = decodeURIComponent(targetUrl).replace(/#/,'%23');
+  var i = fullUrl.indexOf("?");
+  if (i == -1) {
+    return;
+  }
+
+  var queryString = fullUrl.substr(i+1);
+  var params = Ext.urlDecode(queryString);
+
+  var graphTargetList = params['target'];
+  if (typeof graphTargetList == 'string') {
+    graphTargetList = [graphTargetList];
+  }
+  params['target'] = graphTargetList;
+
+  if (graphTargetList.length == 0) {
+    return;
+  }
+ 
+  var graphTargetString = Ext.urlEncode({target: graphTargetList});
+  var existingIndex = graphStore.findExact('target', graphTargetString);
+
+  if (existingIndex > -1) {
+    if ( (options === undefined) || (!options.dontRemove) ) {
+      graphStore.removeAt(existingIndex);
+    }
+  } else {
+    var urlParams = {};
+    Ext.apply(urlParams, defaultGraphParams);
+    Ext.apply(urlParams, params);
+    Ext.apply(urlParams, GraphSize);
+
+    var record = new GraphRecord({
+      target: graphTargetString,
+      params: params,
+      url: '/render?' + Ext.urlEncode(urlParams)
+      });
+      graphStore.add([record]);
+      updateGraphRecords();
   }
 }
 
 function updateGraphRecords() {
-  graphStore.each(function () {
+  graphStore.each(function (item, index) {
     var params = {};
     Ext.apply(params, defaultGraphParams);
-    Ext.apply(params, this.data.params);
+    Ext.apply(params, item.data.params);
     Ext.apply(params, GraphSize);
-    params.uniq = Math.random();
+    params._uniq = Math.random();
     if (params.title === undefined && params.target.length == 1) {
       params.title = params.target[0];
     }
-    this.set('url', '/render?' + Ext.urlEncode(params));
+    if (!params.uniq === undefined) {
+        delete params["uniq"];
+    }
+    item.set('url', '/render?' + Ext.urlEncode(params));
+    item.set('width', GraphSize.width);
+    item.set('height', GraphSize.height);
+    item.set('index', index);
   });
 }
 
@@ -999,8 +1072,10 @@ var defaultRelativeUnits = RegExp.$2;
 var TimeRange = {
   // Default to a relative time range
   type: 'relative',
-  quantity: defaultRelativeQuantity,
-  units: defaultRelativeUnits,
+  relativeStartQuantity: defaultRelativeQuantity,
+  relativeStartUnits: defaultRelativeUnits,
+  relativeUntilQuantity: '',
+  relativeUntilUnits: 'now',
   // Absolute time range
   startDate: new Date(),
   startTime: "9:00 AM",
@@ -1010,7 +1085,11 @@ var TimeRange = {
 
 function getTimeText() {
   if (TimeRange.type == 'relative') {
-    return "Now showing the past " + TimeRange.quantity + ' ' + TimeRange.units;
+    var text = "Now showing the past " + TimeRange.relativeStartQuantity + " " + TimeRange.relativeStartUnits;
+    if (TimeRange.relativeUntilUnits != 'now') {
+      text = text + " until " + TimeRange.relativeUntilQuantity + " " + TimeRange.relativeUntilUnits + " ago";
+    }
+    return text;
   } else {
     var fmt = 'g:ia F jS Y';
     return "Now Showing " + TimeRange.startDate.format(fmt) + ' through ' + TimeRange.endDate.format(fmt);
@@ -1023,8 +1102,12 @@ function updateTimeText() {
 
 function timeRangeUpdated() {
   if (TimeRange.type == 'relative') {
-    var fromParam = '-' + TimeRange.quantity + TimeRange.units;
-    var untilParam = 'now';
+    var fromParam = '-' + TimeRange.relativeStartQuantity + TimeRange.relativeStartUnits;
+    if (TimeRange.relativeUntilUnits == 'now') {
+      var untilParam = 'now';
+    } else {
+      var untilParam = '-' + TimeRange.relativeUntilQuantity + TimeRange.relativeUntilUnits;
+    }
   } else {
     var fromParam = TimeRange.startDate.format('H:i_Ymd');
     var untilParam = TimeRange.endDate.format('H:i_Ymd');
@@ -1050,7 +1133,7 @@ function selectRelativeTime() {
     allowBlank: false,
     regex: /\d+/,
     regexText: "Please enter a number",
-    value: TimeRange.quantity
+    value: TimeRange.relativeStartQuantity
   });
 
   var unitField = new Ext.form.ComboBox({
@@ -1062,15 +1145,58 @@ function selectRelativeTime() {
     allowBlank: false,
     forceSelection: true,
     store: ['minutes', 'hours', 'days', 'weeks', 'months'],
-    value: TimeRange.units
+    value: TimeRange.relativeStartUnits
   });
+
+  var untilQuantityField = new Ext.form.TextField({
+    id: 'until-quantity-field',
+    fieldLabel: "Until",
+    width: 90,
+    allowBlank: true,
+    regex: /\d+/,
+    regexText: "Please enter a number",
+    value: TimeRange.relativeUntilQuantity
+  });
+
+  var untilUnitField = new Ext.form.ComboBox({
+    fieldLabel: "",
+    width: 90,
+    mode: 'local',
+    editable: false,
+    triggerAction: 'all',
+    allowBlank: true,
+    forceSelection: false,
+    store: ['now', 'minutes', 'hours', 'days', 'weeks', 'months'],
+    value: TimeRange.relativeUntilUnits,
+    listeners: {
+      select: function(combo, record, index) {
+                  if (index == 0) {
+                    Ext.getCmp('until-quantity-field').setValue('');
+                    Ext.getCmp('until-quantity-field').setDisabled(true);
+                  } else {
+                    Ext.getCmp('until-quantity-field').setDisabled(false);
+                  }
+                },
+      render: function(combo) {
+                if (combo.getValue() == 'now') {
+                  Ext.getCmp('until-quantity-field').setValue('');
+                  Ext.getCmp('until-quantity-field').setDisabled(true);
+                } else {
+                  Ext.getCmp('until-quantity-field').setDisabled(false);
+                }
+              }
+    }
+  });
+
 
   var win;
 
   function updateTimeRange() {
     TimeRange.type = 'relative';
-    TimeRange.quantity = quantityField.getValue();
-    TimeRange.units = unitField.getValue();
+    TimeRange.relativeStartQuantity = quantityField.getValue();
+    TimeRange.relativeStartUnits = unitField.getValue();
+    TimeRange.relativeUntilQuantity = untilQuantityField.getValue();
+    TimeRange.relativeUntilUnits = untilUnitField.getValue();
     win.close();
     timeRangeUpdated();
   }
@@ -1078,13 +1204,13 @@ function selectRelativeTime() {
   win = new Ext.Window({
     title: "Select Relative Time Range",
     width: 205,
-    height: 130,
+    height: 170,
     resizable: false,
     modal: true,
     layout: 'form',
     labelAlign: 'right',
     labelWidth: 90,
-    items: [quantityField, unitField],
+    items: [quantityField, unitField, untilQuantityField, untilUnitField],
     buttonAlign: 'center',
     buttons: [
       {text: 'Ok', handler: updateTimeRange},
@@ -1161,6 +1287,146 @@ var GraphSize = {
   height: UI_CONFIG.default_graph_height
 };
 
+
+//XXX Add once graph controls allow better +/-
+//function newEmptyGraph() {
+//}
+
+function newFromUrl() {
+  function applyUrl() {
+    var inputUrl = Ext.getCmp('import-url-field').getValue();
+    importGraphUrl(inputUrl);
+    win.close();
+  }
+
+  var urlField = new Ext.form.TextField({
+    id: 'import-url-field',
+    fieldLabel: "Graph URL",
+    region: 'center',
+    width: '100%',
+    listeners: {
+      specialkey: function (field, e) {
+                    if (e.getKey() == e.ENTER) {
+                      applyUrl();
+                    }
+                  },
+      afterrender: function (field) { field.focus(false, 100); }
+    }
+  });
+
+  var win = new Ext.Window({
+    title: "Import Graph From URL",
+    width: 470,
+    height: 87,
+    layout: 'form',
+    resizable: true,
+    modal: true,
+    items: [urlField],
+    buttonAlign: 'center',
+    buttons: [
+      {
+        text: 'OK',
+        handler: applyUrl
+      }, {
+        text: 'Cancel',
+        handler: function () { win.close(); }
+      }
+    ]
+  });
+  win.show();
+
+}
+
+function newFromSavedGraph() {
+  function setParams(loader, node) {
+    var node_id = node.id.replace(/^[A-Za-z]+Tree\.?/,"");
+    loader.baseParams.query = (node_id == "") ? "*" : (node_id + ".*");
+    loader.baseParams.format = 'treejson';
+    loader.baseParams.contexts = '1';
+    loader.baseParams.path = node_id;
+    if (node.parentNode && node.parentNode.id == "UserGraphsTree") {
+      loader.baseParams.user = node.id;
+    }
+  }
+
+  var userGraphsNode = new Ext.tree.AsyncTreeNode({
+    id: 'UserGraphsTree',
+    leaf: false,
+    allowChildren: true,
+    expandable: true,
+    allowDrag: false,
+    loader: new Ext.tree.TreeLoader({
+      url: "../browser/usergraph/",
+      requestMethod: "GET",
+      listeners: {beforeload: setParams}
+    })
+  });
+
+  function handleSelects(selModel, nodes) {
+    Ext.each(nodes, function (node, index) {
+      if (!node.leaf) {
+	node.unselect();
+        node.toggle();
+      }
+    });
+
+    if (selModel.getSelectedNodes().length == 0) {
+      Ext.getCmp('user-graphs-select-button').setDisabled(true);
+    } else {
+      Ext.getCmp('user-graphs-select-button').setDisabled(false);
+    }
+  }
+
+  var treePanel = new Ext.tree.TreePanel({
+    id: 'user-graphs-tree',
+    header: false,
+    region: 'center',
+    root: userGraphsNode,
+    containerScroll: true,
+    autoScroll: true,
+    pathSeparator: '.',
+    rootVisible: false,
+    singleExpand: false,
+    trackMouseOver: true,
+    selModel: new Ext.tree.MultiSelectionModel({
+      listeners: {
+        selectionchange: handleSelects
+      }
+    })
+  });
+
+  function selectUserGraphs(selectedNodes) {
+    Ext.each(selectedNodes, function (node, index) {
+      importGraphUrl(node.attributes.graphUrl);
+    });
+  }
+
+  var win = new Ext.Window({
+    title: "Import From User Graphs",
+    width: 300,
+    height: 400,
+    layout: 'border',
+    resizable: true,
+    modal: true,
+    items: [treePanel],
+    buttonAlign: 'center',
+    buttons: [
+      {
+        id: 'user-graphs-select-button',
+        text: 'Select',
+        disabled: true,
+        handler: function () {
+          selectUserGraphs(Ext.getCmp('user-graphs-tree').getSelectionModel().getSelectedNodes());
+          win.close();
+        }
+      }, {
+        text: 'Cancel',
+        handler: function () { win.close(); }
+      }
+    ]
+  });
+  win.show();
+}
 
 function editDefaultGraphParameters() {
   var editParams = Ext.apply({}, defaultGraphParams);
@@ -1280,6 +1546,7 @@ function selectGraphSize() {
     layout: 'form',
     labelAlign: 'right',
     labelWidth: 80,
+    modal: true,
     items: [presetCombo, widthField, heightField],
     buttonAlign: 'center',
     buttons: [
@@ -1346,7 +1613,7 @@ function showShareWindow() {
         editable: false,
         style: "text-align: center; font-size: large;",
         listeners: {
-          afterrender: function (field) { field.selectText(); }
+          focus: function (field) { field.selectText(); }
         }
       }
     ],
@@ -1512,6 +1779,49 @@ function graphClicked(graphView, graphIndex, element, evt) {
       text: 'Clone',
       width: 100,
       handler: function () { menu.destroy(); cloneGraph(record); }
+    }, {
+      xtype: 'button',
+      fieldLabel: "<span style='visibility: hidden'>",
+      text: 'Email',
+      width: 100,
+      handler: function () { menu.destroy(); mailGraph(record); }
+    }, {
+      xtype: 'button',
+      fieldLabel: "<span style='visibility: hidden'>",
+      text: "Direct URL",
+      width: 100,
+      handler: function () {
+        menu.destroy();
+        var win = new Ext.Window({
+          title: "Graph URL",
+          width: 600,
+          height: 125,
+          layout: 'border',
+          modal: true,
+          items: [
+            {
+              xtype: "label",
+              region: 'north',
+              style: "text-align: center;",
+              text: "Direct URL to this graph"
+            }, {
+              xtype: 'textfield',
+              region: 'center',
+              value:  record.data.url,
+              editable: false,
+              style: "text-align: center; font-size: large;",
+              listeners: {
+                focus: function (field) { field.selectText(); }
+              }
+            }
+          ],
+          buttonAlign: 'center',
+          buttons: [
+            {text: "Close", handler: function () { win.close(); } }
+          ]
+        });
+        win.show();
+      }
     }]
   });
 
@@ -1627,7 +1937,7 @@ function breakoutGraph(record) {
               post: target.substr(i + expr.length)
             }
 
-          }   
+          }
 
         }); //map arglets
       }); //map args
@@ -1657,6 +1967,83 @@ function breakoutGraph(record) {
                 }
               }
   });
+}
+
+function mailGraph(record) {
+  mygraphParams = record.get('params');
+  mygraphParams['target'] = record.data['target'];
+  newparams = Ext.encode(Ext.apply(mygraphParams, defaultGraphParams));
+
+  var fromField = new Ext.form.TextField({
+    fieldLabel: "From",
+    name: 'sender',
+    width: 300,
+    allowBlank: false,
+  });
+
+  var toField = new Ext.form.TextField({
+    fieldLabel: "To",
+    name: 'recipients',
+    width: 300,
+    allowBlank: false,
+  });
+
+  var subjectField = new Ext.form.TextField({
+    fieldLabel: "Subject",
+    name: 'subject',
+    width: 300,
+    allowBlank: false,
+  });
+
+  var msgField = new Ext.form.TextArea({
+    fieldLabel: "Message",
+    name: 'message',
+    width: 300,
+    height: 75
+  });
+
+  var graphParamsField = new Ext.form.TextField({
+     name: 'graph_params',
+     hidden: true,
+     value: newparams
+  });
+
+  var contactForm = new Ext.form.FormPanel({
+    width: 300,
+    labelWidth: 90,
+    items: [fromField, toField, subjectField, msgField, graphParamsField],
+    buttons: [{
+      text: 'Cancel',
+      handler: function(){win.close();}
+    }, {
+         text: 'Send',
+         handler: function(){
+           if(contactForm.getForm().isValid()){
+             contactForm.getForm().submit({
+               url: '/dashboard/email',
+               waitMsg: 'Processing Request',
+               success: function (contactForm, response) {
+         console.log(response.result);
+                 win.close();
+               }
+             });
+           }
+         }
+     }]
+  });
+
+  var win;
+
+  win = new Ext.Window({
+    title: "Send graph via email",
+    width: 450,
+    height: 230,
+    resizable: true,
+    modal: true,
+    layout: 'fit',
+    items: [contactForm],
+  });
+  win.show();
 }
 
 
@@ -1700,6 +2087,7 @@ function removeAllGraphs() {
       title: "Remove All Graphs",
       width: 200,
       height: 120,
+      modal: true,
       layout: 'vbox',
       layoutConfig: { align: 'center' },
       items: [
@@ -1777,7 +2165,7 @@ var keyEventHandlers = {
             graphAreaToggle(record.data.path, {dontRemove: true});
           }
         });
-        focusCompleter(); 
+        focusCompleter();
       }
     },
   completer_del_metrics: function () {
@@ -1903,11 +2291,13 @@ function getState() {
 function applyState(state) {
   setDashboardName(state.name);
 
-  //state.timeConfig = {type, quantity, units, startDate, startTime, endDate, endTime}
+  //state.timeConfig = {type, quantity, units, untilQuantity, untilUnits, startDate, startTime, endDate, endTime}
   var timeConfig = state.timeConfig
   TimeRange.type = timeConfig.type;
-  TimeRange.quantity = timeConfig.quantity;
-  TimeRange.units = timeConfig.units;
+  TimeRange.relativeStartQuantity = timeConfig.quantity;
+  TimeRange.relativeStartUnits = timeConfig.units;
+  TimeRange.relativeUntilQuantity = timeConfig.untilQuantity;
+  TimeRange.relativeUntilUnits = timeConfig.untilUnits;
   TimeRange.startDate = new Date(timeConfig.startDate);
   TimeRange.startTime = timeConfig.startTime;
   TimeRange.endDate = new Date(timeConfig.endDate);
@@ -1967,7 +2357,7 @@ function setDashboardName(name) {
     saveButton.setText("Save");
     saveButton.disable();
   } else {
-    var urlparts = location.href.split('/');
+    var urlparts = location.href.split('#')[0].split('/');
     var i = urlparts.indexOf('dashboard');
     if (i == -1) {
       Ext.Msg.alert("Error", "urlparts = " + Ext.encode(urlparts) + " and indexOf(dashboard) = " + i);
@@ -1978,6 +2368,7 @@ function setDashboardName(name) {
     dashboardURL = urlparts.join('/');
 
     document.title = name + " - Graphite Dashboard";
+    window.location.hash = name;
     navBar.setTitle(name + " - (" + dashboardURL + ")");
     saveButton.setText('Save "' + name + '"');
     saveButton.enable();

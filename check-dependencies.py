@@ -40,6 +40,15 @@ except:
   print "[FATAL] Failed to create an ImageSurface with cairo, you probably need to recompile cairo with PNG support"
   fatal += 1
 
+# Test that cairo can find fonts
+try:
+  if cairo:
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 10, 10)
+    context = cairo.Context(surface)
+    context.font_extents()
+    del surface, context
+except:
+  print "[FATAL] Failed to create text with cairo, this probably means cairo cant find any fonts. Install some system fonts and try again"
 
 # Test for django
 try:
@@ -59,9 +68,8 @@ except:
 
 
 # Verify django version
-if django and django.VERSION[0] < 1:
-  version = '.'.join([str(v) for v in django.VERSION if v is not None])
-  print "[FATAL] You have django version %s installed, but version 1.0 or greater is required" % version
+if django and django.VERSION[:2] < (1,1):
+  print "[FATAL] You have django version %s installed, but version 1.1 or greater is required" % django.get_version()
   fatal += 1
 
 
@@ -83,19 +91,6 @@ except ImportError:
   print "[WARNING] Unable to import Interface from zope.interface."
   print "Without it, you will be unable to run carbon on this server."
   warning +=1
-
-
-
-# Test for mod_python
-try:
-  import mod_python
-except:
-  print "[WARNING] Unable to import the 'mod_python' module, do you have mod_python installed for python %s?" % py_version
-  print "mod_python is one of the most common ways to run graphite-web under apache."
-  print "Without mod_python you will still be able to use the built in development server; which is not"
-  print "recommended for production use."
-  print "wsgi or other approaches for production scale use are also possible without mod_python"
-  warning += 1
 
 
 # Test for python-memcached
@@ -141,7 +136,14 @@ except:
   print "Unable to import the 'twisted' package, do you have Twisted installed for python %s?" % py_version
   print "Without Twisted, you cannot run carbon on this server."
   warning += 1
-
+else:
+  tv = []
+  tv = twisted.__version__.split('.')
+  if int(tv[0]) < 8 or (int(tv[0]) == 8 and int(tv[1]) < 2):
+    print "[WARNING]"
+    print "Your version of Twisted is too old to run carbon."
+    print "You will not be able to run carbon on this server until you upgrade Twisted >= 8.2."
+    warning += 1
 
 # Test for txamqp
 try:

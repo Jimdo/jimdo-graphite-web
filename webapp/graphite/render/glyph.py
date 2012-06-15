@@ -12,12 +12,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License."""
 
-import os, cairo, math, itertools
+import os, cairo, math, itertools, re
+import StringIO
 from datetime import datetime, timedelta
 from urllib import unquote_plus
 from ConfigParser import SafeConfigParser
 from django.conf import settings
 from graphite.render.datalib import TimeSeries
+from graphite.util import json
 
 
 try: # See if there is a system installation of pytz first
@@ -25,6 +27,7 @@ try: # See if there is a system installation of pytz first
 except ImportError: # Otherwise we fall back to Graphite's bundled version
   from graphite.thirdparty import pytz
 
+INFINITY = float('inf')
 
 colorAliases = {
   'black' : (0,0,0),
@@ -120,7 +123,7 @@ class GraphError(Exception):
 class Graph:
   customizable = ('width','height','margin','bgcolor','fgcolor', \
                  'fontName','fontSize','fontBold','fontItalic', \
-                 'colorList','template','yAxisSide')
+                 'colorList','template','yAxisSide','outputFormat')
 
   def __init__(self,**params):
     self.params = params
@@ -133,6 +136,7 @@ class Graph:
     self.margin = int( params.get('margin',10) )
     self.userTimeZone = params.get('tz')
     self.logBase = params.get('logBase', None)
+    self.minorY = int(params.get('minorY', 1))
     if self.logBase:
       if self.logBase == 'e':
         self.logBase = math.e
@@ -173,11 +177,16 @@ class Graph:
 
     self.drawGraph(**params)
 
-  def setupCairo(self,outputFormat='png'): #TODO SVG support
-    self.surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
+  def setupCairo(self,outputFormat='png'):
+    self.outputFormat = outputFormat
+    if outputFormat == 'png':
+      self.surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.width, self.height)
+    else:
+      self.surfaceData = StringIO.StringIO()
+      self.surface = cairo.SVGSurface(self.surfaceData, self.width, self.height)
     self.ctx = cairo.Context(self.surface)
 
-  def setColor(self, value, alpha=1.0):
+  def setColor(self, value, alpha=1.0, forceAlpha=False):
     if type(value) is tuple and len(value) == 3:
       r,g,b = value
     elif value in colorAliases:
@@ -186,7 +195,7 @@ class Graph:
       s = value
       if s[0] == '#': s = s[1:]
       r,g,b = ( int(s[0:2],base=16), int(s[2:4],base=16), int(s[4:6],base=16) )
-      if len(s) == 8:
+      if len(s) == 8 and not forceAlpha:
         alpha = float( int(s[6:8],base=16) ) / 255.0
     else:
       raise ValueError, "Must specify an RGB 3-tuple, an html color string, or a known color alias!"
@@ -260,6 +269,8 @@ class Graph:
       self.ctx.set_matrix(origMatrix)
 
   def drawTitle(self,text):
+    self.encodeHeader('title')
+
     y = self.area['ymin']
     x = self.width / 2
     lineHeight = self.getExtents()['maxHeight']
@@ -267,78 +278,121 @@ class Graph:
       self.drawText(line, x, y, align='center')
       y += lineHeight
     if self.params.get('yAxisSide') == 'right':
-      self.area['ymin'] = y 
+      self.area['ymin'] = y
     else:
       self.area['ymin'] = y + self.margin
 
 
-  def drawLegend(self,elements): #elements is [ (name,color,rightSide), ... ]
-    longestName = sorted([e[0] for e in elements],key=len)[-1]
-    extents = self.getExtents(longestName)
-    padding = 5
-    boxSize = extents['maxHeight'] - 1
-    lineHeight = extents['maxHeight'] + 1
-    labelWidth = extents['width'] + 2 * (boxSize + padding)
-    columns = max(1, math.floor( self.width / labelWidth ))
+  def drawLegend(self, elements, unique=False): #elements is [ (name,color,rightSide), (name,color,rightSide), ... ]
+    self.encodeHeader('legend')
 
-    if self.secondYAxis:
+    if unique:
+      # remove duplicate names
+      namesSeen = []
+      newElements = []
+      for e in elements:
+        if e[0] not in namesSeen:
+          namesSeen.append(e[0])
+          newElements.append(e)
+      elements = newElements
+
+    # Check if there's enough room to use two columns.
+    rightSideLabels = False
+    padding = 5
+    longestName = sorted([e[0] for e in elements],key=len)[-1]
+    testSizeName = longestName + " " + longestName # Double it to check if there's enough room for 2 columns
+    testExt = self.getExtents(testSizeName)
+    testBoxSize = testExt['maxHeight'] - 1
+    testWidth = testExt['width'] + 2 * (testBoxSize + padding)
+    if testWidth + 50 < self.width:
+      rightSideLabels = True
+    
+    if(self.secondYAxis and rightSideLabels):
+      extents = self.getExtents(longestName)
+      padding = 5
+      boxSize = extents['maxHeight'] - 1
+      lineHeight = extents['maxHeight'] + 1
+      labelWidth = extents['width'] + 2 * (boxSize + padding)
+      columns = max(1, math.floor( (self.width - self.area['xmin']) / labelWidth ))
       numRight = len([name for (name,color,rightSide) in elements if rightSide])
       numberOfLines = max(len(elements) - numRight, numRight)
-      columns = math.floor(columns / 2.0)
-    else:
-      numberOfLines = math.ceil( float(len(elements)) / columns )
-
-    if columns < 1: columns = 1
-
-    legendHeight = numberOfLines * (lineHeight + padding)
-    self.area['ymax'] -= legendHeight #scoot the drawing area up to fit the legend
-    self.ctx.set_line_width(1.0)
-
-    x = self.area['xmin']
-    y = self.area['ymax'] + (2 * padding)
-    n = 0
-    if self.secondYAxis:
+      columns = math.floor(columns / 2.0) 
+      if columns < 1: columns = 1
+      legendHeight = numberOfLines * (lineHeight + padding)
+      self.area['ymax'] -= legendHeight #scoot the drawing area up to fit the legend
+      self.ctx.set_line_width(1.0)
+      x = self.area['xmin']
+      y = self.area['ymax'] + (2 * padding)
+      n = 0
       xRight = self.area['xmax'] - self.area['xmin']
       yRight = y
       nRight = 0
-
-    for (name,color,rightSide) in elements:
-      if self.secondYAxis and rightSide:
-        nRight += 1
-      else:
-        n += 1
-
-      self.setColor( color )
-      if self.secondYAxis and rightSide:
-        self.drawRectangle(xRight - padding,yRight,boxSize,boxSize)
-      else:
-        self.drawRectangle(x,y,boxSize,boxSize)
-
-      self.setColor( 'darkgrey' )
-      if self.secondYAxis and rightSide:
-        self.drawRectangle(xRight - padding,yRight,boxSize,boxSize,fill=False)
-      else:
-        self.drawRectangle(x,y,boxSize,boxSize,fill=False)
-
-      self.setColor( self.foregroundColor )
-      if self.secondYAxis and rightSide:
-        self.drawText(name, xRight - boxSize, yRight, align='right')
-      else:
-        self.drawText(name, x + boxSize + padding, y, align='left')
-
-      if self.secondYAxis and rightSide:
-        xRight -= labelWidth
-
-        if nRight % columns == 0:
-          xRight = self.area['xmax'] - self.area['xmin']
-          yRight += lineHeight
-      else:
-        x += labelWidth
-
-        if n % columns == 0:
+      for (name,color,rightSide) in elements:
+        self.setColor( color )
+        if rightSide:
+          nRight += 1 
+          self.drawRectangle(xRight - padding,yRight,boxSize,boxSize)
+          self.setColor( 'darkgrey' )
+          self.drawRectangle(xRight - padding,yRight,boxSize,boxSize,fill=False)
+          self.setColor( self.foregroundColor )
+          self.drawText(name, xRight - boxSize, yRight, align='right')
+          xRight -= labelWidth
+          if nRight % columns == 0:
+            xRight = self.area['xmax'] - self.area['xmin']
+            yRight += lineHeight
+        else:
+          n += 1 
+          self.drawRectangle(x,y,boxSize,boxSize)
+          self.setColor( 'darkgrey' )
+          self.drawRectangle(x,y,boxSize,boxSize,fill=False)
+          self.setColor( self.foregroundColor )
+          self.drawText(name, x + boxSize + padding, y, align='left')
+          x += labelWidth
+          if n % columns == 0:
+            x = self.area['xmin']
+            y += lineHeight
+    else:
+      extents = self.getExtents(longestName)
+      boxSize = extents['maxHeight'] - 1
+      lineHeight = extents['maxHeight'] + 1
+      labelWidth = extents['width'] + 2 * (boxSize + padding)
+      columns = math.floor( self.width / labelWidth )
+      if columns < 1: columns = 1
+      numberOfLines = math.ceil( float(len(elements)) / columns )
+      legendHeight = numberOfLines * (lineHeight + padding)
+      self.area['ymax'] -= legendHeight #scoot the drawing area up to fit the legend
+      self.ctx.set_line_width(1.0)
+      x = self.area['xmin']
+      y = self.area['ymax'] + (2 * padding)
+      for i,(name,color,rightSide) in enumerate(elements):
+        if rightSide:
+          self.setColor( color )
+          self.drawRectangle(x + labelWidth + padding,y,boxSize,boxSize)
+          self.setColor( 'darkgrey' )
+          self.drawRectangle(x + labelWidth + padding,y,boxSize,boxSize,fill=False)
+          self.setColor( self.foregroundColor )
+          self.drawText(name, x + labelWidth, y, align='right')
+          x += labelWidth
+        else:
+          self.setColor( color )
+          self.drawRectangle(x,y,boxSize,boxSize)
+          self.setColor( 'darkgrey' )
+          self.drawRectangle(x,y,boxSize,boxSize,fill=False)
+          self.setColor( self.foregroundColor )
+          self.drawText(name, x + boxSize + padding, y, align='left')
+          x += labelWidth
+        if (i + 1) % columns == 0:
           x = self.area['xmin']
           y += lineHeight
 
+  def encodeHeader(self,text):
+    self.ctx.save()
+    self.setColor( self.backgroundColor )
+    self.ctx.move_to(-88,-88) # identifier
+    for i, char in enumerate(text):
+      self.ctx.line_to(-ord(char), -i-1)
+    self.ctx.stroke()
+    self.ctx.restore()
 
   def loadTemplate(self,template):
     conf = SafeConfigParser()
@@ -368,7 +422,70 @@ class Graph:
     }
 
   def output(self, fileObj):
-    self.surface.write_to_png(fileObj)
+    if self.outputFormat == 'png':
+      self.surface.write_to_png(fileObj)
+    else:
+      metaData = {
+        'x': {
+          'start': self.startTime,
+          'end': self.endTime
+        },
+        'y': {
+          'top': self.yTop,
+          'bottom': self.yBottom,
+          'step': self.yStep,
+          'labels': self.yLabels,
+          'labelValues': self.yLabelValues
+        },
+        'options': {
+          'lineWidth': self.lineWidth
+        },
+        'font': self.defaultFontParams,
+        'area': self.area,
+        'series': []
+      }
+
+      for series in self.data:
+        if 'stacked' not in series.options:
+          metaData['series'].append({
+            'name': series.name,
+            'start': series.start,
+            'end': series.end,
+            'step': series.step,
+            'valuesPerPoint': series.valuesPerPoint,
+            'color': series.color,
+            'data': series,
+            'options': series.options
+          })
+
+      self.surface.finish()
+      svgData = self.surfaceData.getvalue()
+      self.surfaceData.close()
+
+      svgData = svgData.replace('pt"', 'px"', 2) # we expect height/width in pixels, not points
+      svgData = svgData.replace('</svg>\n', '', 1)
+      svgData = svgData.replace('</defs>\n<g', '</defs>\n<g class="graphite"', 1)
+
+      # We encode headers using special paths with d^="M -88 -88"
+      # Find these, and turn them into <g> wrappers instead
+      def onHeaderPath(match):
+        name = ''
+        for char in re.findall(r'L -(\d+) -\d+', match.group(1)):
+          name += chr(int(char))
+        return '</g><g data-header="true" class="%s">' % name
+      svgData = re.sub(r'<path.+?d="M -88 -88 (.+?)"/>', onHeaderPath, svgData)
+
+      # Replace the first </g><g> with <g>, and close out the last </g> at the end
+      svgData = svgData.replace('</g><g data-header','<g data-header',1) + "</g>"
+      svgData = svgData.replace(' data-header="true"','')
+
+      fileObj.write(svgData)
+      fileObj.write("""<script>
+  <![CDATA[
+    metadata = %s
+  ]]>
+</script>
+</svg>""" % json.dumps(metaData))
 
 
 class LineGraph(Graph):
@@ -381,7 +498,8 @@ class LineGraph(Graph):
                   'yUnitSystem', 'logBase','yMinLeft','yMinRight','yMaxLeft', \
                   'yMaxRight', 'yLimitLeft', 'yLimitRight', 'yStepLeft', \
                   'yStepRight', 'rightWidth', 'rightColor', 'rightDashed', \
-                  'leftWidth', 'leftColor', 'leftDashed', 'xFormat')
+                  'leftWidth', 'leftColor', 'leftDashed', 'xFormat', 'minorY', \
+                  'hideYAxis', 'uniqueLegend', 'vtitleRight')
   validLineModes = ('staircase','slope','connected')
   validAreaModes = ('none','first','all','stacked')
   validPieModes = ('maximum', 'minimum', 'average')
@@ -417,6 +535,7 @@ class LineGraph(Graph):
       params['hideLegend'] = True
       params['hideGrid'] = True
       params['hideAxes'] = True
+      params['hideYAxis'] = False
       params['yAxisSide'] = 'left'
       params['title'] = ''
       params['vtitle'] = ''
@@ -460,8 +579,15 @@ class LineGraph(Graph):
     assert self.areaMode in self.validAreaModes, "Invalid area mode!"
     self.pieMode = params.get('pieMode', 'maximum').lower()
     assert self.pieMode in self.validPieModes, "Invalid pie mode!"
-    
-    
+
+    # Line mode slope does not work (or even make sense) for series that have
+    # only one datapoint. So if any series have one datapoint we force staircase mode.
+    if self.lineMode == 'slope':
+      for series in self.data:
+        if len(series) == 1:
+          self.lineMode = 'staircase'
+          break
+
     if self.secondYAxis:
       for series in self.data:
         if 'secondYAxis' in series.options:
@@ -486,40 +612,54 @@ class LineGraph(Graph):
     titleSize = self.defaultFontParams['size'] + math.floor( math.log(self.defaultFontParams['size']) )
     self.setFont( size=titleSize )
     self.setColor( self.foregroundColor )
+
     if params.get('title'):
       self.drawTitle( str(params['title']) )
     if params.get('vtitle'):
       self.drawVTitle( str(params['vtitle']) )
+    if self.secondYAxis and params.get('vtitleRight'):
+      self.drawVTitle( str(params['vtitleRight']), rightAlign=True )
     self.setFont()
 
     if not params.get('hideLegend', len(self.data) > settings.LEGEND_MAX_ITEMS):
       elements = [ (series.name,series.color,series.options.get('secondYAxis')) for series in self.data if series.name ]
-      self.drawLegend(elements)
+      self.drawLegend(elements, params.get('uniqueLegend', False))
 
     #Setup axes, labels, and grid
     #First we adjust the drawing area size to fit X-axis labels
     if not self.params.get('hideAxes',False):
       self.area['ymax'] -= self.getExtents()['maxAscent'] * 2
+    
+    self.startTime = min([series.start for series in self.data])
+    if self.lineMode == 'staircase':
+      self.endTime = max([series.end for series in self.data])
+    else:
+      self.endTime = max([(series.end - series.step) for series in self.data])
+    self.timeRange = self.endTime - self.startTime
 
     #Now we consolidate our data points to fit in the currently estimated drawing area
-    self.consolidateDataPoints() 
+    self.consolidateDataPoints()
+
+    self.encodeHeader('axes')
 
     #Now its time to fully configure the Y-axis and determine the space required for Y-axis labels
     #Since we'll probably have to squeeze the drawing area to fit the Y labels, we may need to
     #reconsolidate our data points, which in turn means re-scaling the Y axis, this process will
     #repeat until we have accurate Y labels and enough space to fit our data points
     currentXMin = self.area['xmin']
+    currentXMax = self.area['xmax']
     if self.secondYAxis:
       self.setupTwoYAxes()
     else:
       self.setupYAxis()
-    while currentXMin != self.area['xmin']: #see if the Y-labels require more space
+    while currentXMin != self.area['xmin'] or currentXMax != self.area['xmax']: #see if the Y-labels require more space
       self.consolidateDataPoints() #this can cause the Y values to change
       currentXMin = self.area['xmin'] #so let's keep track of the previous Y-label space requirements
+      currentXMax = self.area['xmax']
       if self.secondYAxis: #and recalculate their new requirements 
         self.setupTwoYAxes()
       else:
-        self.setupYAxis() 
+        self.setupYAxis()
 
     #Now that our Y-axis is finalized, let's determine our X labels (this won't affect the drawing area)
     self.setupXAxis()
@@ -527,68 +667,69 @@ class LineGraph(Graph):
     if not self.params.get('hideAxes',False):
       self.drawLabels()
       if not self.params.get('hideGrid',False): #hideAxes implies hideGrid
+        self.encodeHeader('grid')
         self.drawGridLines()
 
     #Finally, draw the graph lines
+    self.encodeHeader('lines')
     self.drawLines()
 
-  def drawVTitle(self,text):
+  def drawVTitle(self, text, rightAlign=False):
     lineHeight = self.getExtents()['maxHeight']
-    x = self.area['xmin'] + lineHeight
-    y = self.height / 2
-    for line in text.split('\n'):
-      self.drawText(line, x, y, align='center', valign='baseline', rotate=270)
-      x += lineHeight
-    self.area['xmin'] = x + self.margin + lineHeight
+
+    if rightAlign:
+      self.encodeHeader('vtitleRight')
+      x = self.area['xmax'] - lineHeight
+      y = self.height / 2
+      for line in text.split('\n'):
+        self.drawText(line, x, y, align='center', valign='baseline', rotate=90)
+        x -= lineHeight
+      self.area['xmax'] = x - self.margin - lineHeight
+    else:
+      self.encodeHeader('vtitle')
+      x = self.area['xmin'] + lineHeight
+      y = self.height / 2
+      for line in text.split('\n'):
+        self.drawText(line, x, y, align='center', valign='baseline', rotate=270)
+        x += lineHeight
+      self.area['xmin'] = x + self.margin + lineHeight
 
   def getYCoord(self, value, side=None):
-    if not side:
-      try:
-        highestValue = max(self.yLabelValues)
-        lowestValue = min(self.yLabelValues)
-      except ValueError:
-        highestValue = self.yTop
-        lowestValue = self.yBottom
-      pixelRange = self.area['ymax'] - self.area['ymin']
-
-      relativeValue = value - lowestValue
-      valueRange = highestValue - lowestValue
-
-      if self.logBase:
-          if value <= 0:
-              return None
-          relativeValue = math.log(value, self.logBase) - math.log(lowestValue, self.logBase)
-          valueRange = math.log(highestValue, self.logBase) - math.log(lowestValue, self.logBase)
-
-      pixelToValueRatio = pixelRange / valueRange
-      valueInPixels = pixelToValueRatio * relativeValue
-      return self.area['ymax'] - valueInPixels
+    if "left" == side:
+      yLabelValues = self.yLabelValuesL
+      yTop = self.yTopL
+      yBottom = self.yBottomL
+    elif "right" == side:
+      yLabelValues = self.yLabelValuesR
+      yTop = self.yTopR
+      yBottom = self.yBottomR
     else:
-      if "left" in side:
-        yLabelValues = self.yLabelValuesL
-      elif "right" in side:
-        yLabelValues = self.yLabelValuesR
-      try:
-        highestValue = max(yLabelValues)
-        lowestValue = min(yLabelValues)
-      except ValueError:
-        highestValue = self.yTop
-        lowestValue = self.yBottom
-      pixelRange = self.area['ymax'] - self.area['ymin']
+      yLabelValues = self.yLabelValues
+      yTop = self.yTop
+      yBottom = self.yBottom
 
-      relativeValue = value - lowestValue
-      valueRange = highestValue - lowestValue
+    try:
+      highestValue = max(yLabelValues)
+      lowestValue = min(yLabelValues)
+    except ValueError:
+      highestValue = yTop
+      lowestValue = yBottom
 
-      if self.logBase:
-          if value <= 0:
-              return None
-          relativeValue = math.log(value, self.logBase) - math.log(lowestValue, self.logBase)
-          valueRange = math.log(highestValue, self.logBase) - math.log(lowestValue, self.logBase)
+    pixelRange = self.area['ymax'] - self.area['ymin']
 
-      pixelToValueRatio = pixelRange / valueRange
-      valueInPixels = pixelToValueRatio * relativeValue
-      return self.area['ymax'] - valueInPixels
-      
+    relativeValue = value - lowestValue
+    valueRange = highestValue - lowestValue
+
+    if self.logBase:
+        if value <= 0:
+            return None
+        relativeValue = math.log(value, self.logBase) - math.log(lowestValue, self.logBase)
+        valueRange = math.log(highestValue, self.logBase) - math.log(lowestValue, self.logBase)
+
+    pixelToValueRatio = pixelRange / valueRange
+    valueInPixels = pixelToValueRatio * relativeValue
+    return self.area['ymax'] - valueInPixels
+
 
   def drawLines(self, width=None, dash=None, linecap='butt', linejoin='miter'):
     if not width: width = self.lineWidth
@@ -609,6 +750,7 @@ class LineGraph(Graph):
       'round' : cairo.LINE_JOIN_ROUND,
       'bevel' : cairo.LINE_JOIN_BEVEL,
     }[linejoin])
+
     # stack the values
     if self.areaMode == 'stacked' and not self.secondYAxis: #TODO Allow stacked area mode with secondYAxis
       total = []
@@ -621,15 +763,41 @@ class LineGraph(Graph):
             series[i] += total[i]
             total[i] += original
 
-      self.data = reverse_sort(self.data)
-
-    # Check whether there is an stacked metric
+    # check whether there is an stacked metric
     singleStacked = False
     for series in self.data:
       if 'stacked' in series.options:
         singleStacked = True
     if singleStacked:
-      self.data = reverse_sort_stacked(self.data)
+      self.data = sort_stacked(self.data)
+
+    # apply stacked setting on series based on areaMode
+    if self.areaMode == 'first':
+      self.data[0].options['stacked'] = True
+    elif self.areaMode != 'none':
+      for series in self.data:
+        series.options['stacked'] = True
+
+    # apply alpha channel and create separate stroke series
+    if self.params.get('areaAlpha'):
+      try:
+        alpha = float(self.params['areaAlpha'])
+      except ValueError:
+        alpha = 0.5
+        pass
+
+      strokeSeries = []
+      for series in self.data:
+        if 'stacked' in series.options:
+          series.options['alpha'] = alpha
+
+          newSeries = TimeSeries(series.name, series.start, series.end, series.step*series.valuesPerPoint, [x for x in series])
+          newSeries.xStep = series.xStep
+          newSeries.color = series.color
+          if 'secondYAxis' in series.options:
+            newSeries.options['secondYAxis'] = True
+          strokeSeries.append(newSeries)
+      self.data += strokeSeries
 
     # setup the clip region
     self.ctx.set_line_width(1.0)
@@ -637,29 +805,40 @@ class LineGraph(Graph):
     self.ctx.clip()
     self.ctx.set_line_width(originalWidth)
 
-    if self.params.get('areaAlpha') and self.areaMode == 'first': 
-      alphaSeries = TimeSeries(None, self.data[0].start, self.data[0].end, self.data[0].step, [x for x in self.data[0]])
-      alphaSeries.xStep = self.data[0].xStep
-      alphaSeries.color = self.data[0].color
-      try:
-        alphaSeries.options['alpha'] = float(self.params['areaAlpha'])
-      except ValueError:
-        pass
-      self.data.insert(0, alphaSeries)
+    # save clip to restore once stacked areas are drawn
+    self.ctx.save()
+    clipRestored = False
 
     for series in self.data:
 
-      if 'lineWidth' in series.options: # adjusts the lineWidth of this line if option is set on the series
+      if 'stacked' not in series.options:
+        # stacked areas are always drawn first. if this series is not stacked, we finished stacking.
+        # reset the clip region so lines can show up on top of the stacked areas.
+        if not clipRestored:
+          clipRestored = True
+          self.ctx.restore()
+
+      if 'lineWidth' in series.options:
         self.ctx.set_line_width(series.options['lineWidth'])
 
-      if 'dashed' in series.options: # turn on dashing if dashed option set
-        self.ctx.set_dash([ series.options['dashed'] ],1)
+      if 'dashed' in series.options:
+        self.ctx.set_dash([ series.options['dashed'] ], 1)
       else:
         self.ctx.set_dash([], 0)
 
-      x = float(self.area['xmin']) + (self.lineWidth / 2.0)
+      # Shift the beginning of drawing area to the start of the series if the
+      # graph itself has a larger range
+      missingPoints = (series.start - self.startTime) / series.step
+      startShift = series.xStep * (missingPoints / series.valuesPerPoint)
+      x = float(self.area['xmin']) + startShift + (self.lineWidth / 2.0)
       y = float(self.area['ymin'])
-      self.setColor( series.color, series.options.get('alpha') or 1.0)
+
+      startX = x
+
+      if series.options.get('invisible'):
+        self.setColor( series.color, 0, True )
+      else:
+        self.setColor( series.color, series.options.get('alpha') or 1.0 )
 
       fromNone = True
 
@@ -671,10 +850,11 @@ class LineGraph(Graph):
           value = 0.0
 
         if value is None:
-          if not fromNone and self.areaMode != 'none' or series.options.has_key('stacked'): #Close off and fill area before unknown interval
-            self.ctx.line_to(x, self.area['ymax'])
-            self.ctx.close_path()
-            self.ctx.fill()
+          if not fromNone:
+            self.ctx.line_to(x, y)
+            if 'stacked' in series.options: #Close off and fill area before unknown interval
+              self.fillAreaAndClip(x, y, startX)
+
           x += series.xStep
           fromNone = True
 
@@ -699,14 +879,12 @@ class LineGraph(Graph):
             x += series.xStep
             continue
 
+          if fromNone:
+            startX = x
+
           if self.lineMode == 'staircase':
             if fromNone:
-              if self.areaMode != 'none':
-                self.ctx.move_to(x, self.area['ymax'])
-                self.ctx.line_to(x, y)
-              else:
-                self.ctx.move_to(x, y)
-
+              self.ctx.move_to(x, y)
             else:
               self.ctx.line_to(x, y)
 
@@ -715,29 +893,19 @@ class LineGraph(Graph):
 
           elif self.lineMode == 'slope':
             if fromNone:
-              if self.areaMode != 'none' or series.options.has_key('stacked'):
-                self.ctx.move_to(x, self.area['ymax'])
-                self.ctx.line_to(x, y)
-              else:
-                self.ctx.move_to(x, y)
+              self.ctx.move_to(x, y)
 
+            self.ctx.line_to(x, y)
             x += series.xStep
-            self.ctx.line_to(x,y)
 
           elif self.lineMode == 'connected':
-            x += series.xStep
             self.ctx.line_to(x, y)
+            x += series.xStep
 
           fromNone = False
 
-      if self.areaMode != 'none':
-        self.ctx.line_to(x, self.area['ymax'])
-        self.ctx.close_path()
-        self.ctx.fill()
-
-        if self.areaMode == 'first':
-          self.areaMode = 'none' #This ensures only the first line is drawn as area
-
+      if 'stacked' in series.options:
+        self.fillAreaAndClip(x-series.xStep, y, startX)
       else:
         self.ctx.stroke()
 
@@ -748,12 +916,32 @@ class LineGraph(Graph):
         else:
           self.ctx.set_dash([],0)
 
+  def fillAreaAndClip(self, x, y, startX=None):
+    startX = (startX or self.area['xmin'])
+    pattern = self.ctx.copy_path()
+
+    self.ctx.line_to(x, self.area['ymax'])                  # bottom endX
+    self.ctx.line_to(startX, self.area['ymax'])             # bottom startX
+    self.ctx.close_path()
+    self.ctx.fill()
+
+    self.ctx.append_path(pattern)
+    self.ctx.line_to(x, self.area['ymax'])                  # bottom endX
+    self.ctx.line_to(self.area['xmax'], self.area['ymax'])  # bottom right
+    self.ctx.line_to(self.area['xmax'], self.area['ymin'])  # top right
+    self.ctx.line_to(self.area['xmin'], self.area['ymin'])  # top left
+    self.ctx.line_to(self.area['xmin'], self.area['ymax'])  # bottom left
+    self.ctx.line_to(startX, self.area['ymax'])             # bottom startX
+    self.ctx.close_path()
+    self.ctx.clip()
+
   def consolidateDataPoints(self):
     numberOfPixels = self.graphWidth = self.area['xmax'] - self.area['xmin'] - (self.lineWidth + 1)
     for series in self.data:
-      numberOfDataPoints = len(series)
+      numberOfDataPoints = self.timeRange/series.step
       minXStep = float( self.params.get('minXStep',1.0) )
-      bestXStep = numberOfPixels / numberOfDataPoints
+      divisor = self.timeRange / series.step
+      bestXStep = numberOfPixels / divisor
       if bestXStep < minXStep:
         drawableDataPoints = int( numberOfPixels / minXStep )
         pointsPerPixel = math.ceil( float(numberOfDataPoints) / float(drawableDataPoints) )
@@ -764,16 +952,21 @@ class LineGraph(Graph):
 
   def setupYAxis(self):
     seriesWithMissingValues = [ series for series in self.data if None in series ]
-    
+
     if self.params.get('drawNullAsZero') and seriesWithMissingValues:
       yMinValue = 0.0
     else:
       yMinValue = safeMin( [safeMin(series) for series in self.data if not series.options.get('drawAsInfinite')] )
 
     if self.areaMode == 'stacked':
-      yMaxValue = safeSum( [safeMax(series) for series in self.data] )
+      length = safeMin( [len(series) for series in self.data if not series.options.get('drawAsInfinite')] )
+      sumSeries = []
+
+      for i in xrange(0, length):
+        sumSeries.append( safeSum( [series[i] for series in self.data if not series.options.get('drawAsInfinite')] ) )
+      yMaxValue = safeMax( sumSeries )
     else:
-      yMaxValue = safeMax( [safeMax(series) for series in self.data] )
+      yMaxValue = safeMax( [safeMax(series) for series in self.data if not series.options.get('drawAsInfinite')] )
 
     if yMinValue is None:
       yMinValue = 0.0
@@ -782,7 +975,8 @@ class LineGraph(Graph):
       yMaxValue = 1.0
 
     if 'yMax' in self.params:
-      yMaxValue = self.params['yMax']
+      if self.params['yMax'] != 'max':
+        yMaxValue = self.params['yMax']
 
     if 'yLimit' in self.params and self.params['yLimit'] < yMaxValue:
       yMaxValue = self.params['yLimit']
@@ -794,8 +988,12 @@ class LineGraph(Graph):
       yMaxValue = yMinValue + 1
 
     yVariance = yMaxValue - yMinValue
-    order = math.log10(yVariance)
-    orderFactor = 10 ** math.floor(order)
+    if 'yUnitSystem' in self.params and self.params['yUnitSystem'] == 'binary':
+      order = math.log(yVariance, 2)
+      orderFactor = 2 ** math.floor(order)
+    else:
+      order = math.log10(yVariance)
+      orderFactor = 10 ** math.floor(order)
     v = yVariance / orderFactor #we work with a scaled down yVariance for simplicity
 
     divisors = (4,5,6) #different ways to divide-up the y-axis with labels
@@ -825,7 +1023,12 @@ class LineGraph(Graph):
                          'minimum value less than or equal to zero')
 
     if 'yMax' in self.params:
-      self.yTop = self.params['yMax']
+      if self.params['yMax'] == 'max':
+        scale = 1.0 * yMaxValue / self.yTop
+        self.yStep *= (scale - 0.000001)
+        self.yTop = yMaxValue
+      else:
+        self.yTop = self.params['yMax'] * 1.0
     if 'yMin' in self.params:
       self.yBottom = self.params['yMin']
 
@@ -862,19 +1065,20 @@ class LineGraph(Graph):
         else:
           return "%g %s" % (float(yValue), prefix)
 
-      self.yLabelValues = self.getYLabelValues(self.yBottom, self.yTop)
+      self.yLabelValues = self.getYLabelValues(self.yBottom, self.yTop, self.yStep)
       self.yLabels = map(makeLabel,self.yLabelValues)
       self.yLabelWidth = max([self.getExtents(label)['width'] for label in self.yLabels])
 
-      if self.params.get('yAxisSide') == 'left': #scoot the graph over to the left just enough to fit the y-labels
-        xMin = self.margin + (self.yLabelWidth * 1.02)
-        if self.area['xmin'] < xMin:
-          self.area['xmin'] = xMin
-      else: #scoot the graph over to the right just enough to fit the y-labels
-        xMin = 0
-        xMax = self.margin - (self.yLabelWidth * 1.02)
-        if self.area['xmax'] >= xMax:
-          self.area['xmax'] = xMax
+      if not self.params.get('hideYAxis'):
+        if self.params.get('yAxisSide') == 'left': #scoot the graph over to the left just enough to fit the y-labels
+          xMin = self.margin + (self.yLabelWidth * 1.02)
+          if self.area['xmin'] < xMin:
+            self.area['xmin'] = xMin
+        else: #scoot the graph over to the right just enough to fit the y-labels
+          xMin = 0
+          xMax = self.margin - (self.yLabelWidth * 1.02)
+          if self.area['xmax'] >= xMax:
+            self.area['xmax'] = xMax
     else:
       self.yLabelValues = []
       self.yLabels = []
@@ -914,7 +1118,7 @@ class LineGraph(Graph):
       yMaxValueR = safeMax( [safeMax(series) for series in Rdata] )
 
     if yMinValueL is None:
-      yMinValue = 0.0
+      yMinValueL = 0.0
     if yMinValueR is None:
       yMinValueR = 0.0
 
@@ -1041,10 +1245,7 @@ class LineGraph(Graph):
     for value in self.yLabelValuesR: 
       self.yLabelsR.append( makeLabel(value,self.yStepR,self.ySpanR) )
     self.yLabelWidthL = max([self.getExtents(label)['width'] for label in self.yLabelsL])
-    # The next line seems to set a value much too large in most cases
-    # By subtracting 10 px, the right side axis looks much nicer.
-    # Tested with standard, binary, and none yAxis units.
-    self.yLabelWidthR = max([self.getExtents(label)['width'] for label in self.yLabelsR]) - 10 
+    self.yLabelWidthR = max([self.getExtents(label)['width'] for label in self.yLabelsR])
     #scoot the graph over to the left just enough to fit the y-labels
         
     #xMin = self.margin + self.margin + (self.yLabelWidthL * 1.02)
@@ -1052,7 +1253,7 @@ class LineGraph(Graph):
     if self.area['xmin'] < xMin:
       self.area['xmin'] = xMin
     #scoot the graph over to the right just enough to fit the y-labels
-    xMax = self.area['xmax'] - (self.yLabelWidthR * 1.02)
+    xMax = self.width - (self.yLabelWidthR * 1.02)
     if self.area['xmax'] >= xMax:
       self.area['xmax'] = xMax
 
@@ -1061,17 +1262,10 @@ class LineGraph(Graph):
     if self.logBase:
       vals = list( logrange(self.logBase, minYValue, maxYValue) )
     else:
-      if self.secondYAxis:
-        vals = list( frange(minYValue,maxYValue,yStep) )
-      else:
-        vals = list( frange(self.yBottom,self.yTop,self.yStep) )
+      vals = list( frange(minYValue, maxYValue, yStep) )
     return vals
 
   def setupXAxis(self):
-    self.startTime = min([series.start for series in self.data])
-    self.endTime = max([series.end for series in self.data])
-    timeRange = self.endTime - self.startTime
-
     if self.userTimeZone:
       tzinfo = pytz.timezone(self.userTimeZone)
     else:
@@ -1080,10 +1274,10 @@ class LineGraph(Graph):
     self.start_dt = datetime.fromtimestamp(self.startTime, tzinfo)
     self.end_dt = datetime.fromtimestamp(self.endTime, tzinfo)
 
-    secondsPerPixel = float(timeRange) / float(self.graphWidth)
-    self.xScaleFactor = float(self.graphWidth) / float(timeRange) #pixels per second
+    secondsPerPixel = float(self.timeRange) / float(self.graphWidth)
+    self.xScaleFactor = float(self.graphWidth) / float(self.timeRange) #pixels per second
 
-    potential = [c for c in xAxisConfigs if c['seconds'] <= secondsPerPixel and c.get('maxInterval', timeRange + 1) >= timeRange]
+    potential = [c for c in xAxisConfigs if c['seconds'] <= secondsPerPixel and c.get('maxInterval', self.timeRange + 1) >= self.timeRange]
     if potential:
       self.xConf = potential[-1]
     else:
@@ -1096,42 +1290,43 @@ class LineGraph(Graph):
 
   def drawLabels(self):
     #Draw the Y-labels
-    if not self.secondYAxis:
-      for value,label in zip(self.yLabelValues,self.yLabels):
-        if self.params.get('yAxisSide') == 'left':
-          x = self.area['xmin'] - (self.yLabelWidth * 0.02)
-        else:
-          x = self.area['xmax'] + (self.yLabelWidth * 0.02) #Inverted for right side Y Axis
+    if not self.params.get('hideYAxis'):
+      if not self.secondYAxis:
+        for value,label in zip(self.yLabelValues,self.yLabels):
+          if self.params.get('yAxisSide') == 'left':
+            x = self.area['xmin'] - (self.yLabelWidth * 0.02)
+          else:
+            x = self.area['xmax'] + (self.yLabelWidth * 0.02) #Inverted for right side Y Axis
 
-        y = self.getYCoord(value)
-        if y is None:
+          y = self.getYCoord(value)
+          if y is None:
+              value = None
+          elif y < 0:
+              y = 0
+
+          if self.params.get('yAxisSide') == 'left':
+            self.drawText(label, x, y, align='right', valign='middle')
+          else:
+            self.drawText(label, x, y, align='left', valign='middle') #Inverted for right side Y Axis
+      else: #Draws a right side and a Left side axis
+        for valueL,labelL in zip(self.yLabelValuesL,self.yLabelsL):
+          xL = self.area['xmin'] - (self.yLabelWidthL * 0.02)
+          yL = self.getYCoord(valueL, "left")
+          if yL is None:
             value = None
-        elif y < 0:
-            y = 0
-
-        if self.params.get('yAxisSide') == 'left':
-          self.drawText(label, x, y, align='right', valign='middle')
-        else:
-          self.drawText(label, x, y, align='left', valign='middle') #Inverted for right side Y Axis
-    else: #Draws a right side and a Left side axis
-      for valueL,labelL in zip(self.yLabelValuesL,self.yLabelsL):
-        xL = self.area['xmin'] - (self.yLabelWidthL * 0.02)
-        yL = self.getYCoord(valueL, "left")
-        if yL is None:
-          value = None
-        elif yL < 0:
-          yL = 0
-        self.drawText(labelL, xL, yL, align='right', valign='middle')
-        
-        ### Right Side
-      for valueR,labelR in zip(self.yLabelValuesR,self.yLabelsR):
-        xR = self.area['xmax'] + (self.yLabelWidthR * 0.02) + 3 #Inverted for right side Y Axis
-        yR = self.getYCoord(valueR, "right")
-        if yR is None:
-          valueR = None
-        elif yR < 0:
-          yR = 0
-        self.drawText(labelR, xR, yR, align='left', valign='middle') #Inverted for right side Y Axis
+          elif yL < 0:
+            yL = 0
+          self.drawText(labelL, xL, yL, align='right', valign='middle')
+          
+          ### Right Side
+        for valueR,labelR in zip(self.yLabelValuesR,self.yLabelsR):
+          xR = self.area['xmax'] + (self.yLabelWidthR * 0.02) + 3 #Inverted for right side Y Axis
+          yR = self.getYCoord(valueR, "right")
+          if yR is None:
+            valueR = None
+          elif yR < 0:
+            yR = 0
+          self.drawText(labelR, xR, yR, align='left', valign='middle') #Inverted for right side Y Axis
       
     (dt, x_label_delta) = find_x_times(self.start_dt, self.xConf['labelUnit'], self.xConf['labelStep'])
 
@@ -1156,6 +1351,8 @@ class LineGraph(Graph):
       labels = self.yLabelValuesL
     else:
       labels = self.yLabelValues
+    if self.logBase:
+      labels.append(self.logBase * max(labels))
 
     for i, value in enumerate(labels):
       self.ctx.set_line_width(0.4)
@@ -1171,37 +1368,47 @@ class LineGraph(Graph):
       self.ctx.move_to(leftSide, y)
       self.ctx.line_to(rightSide, y)
       self.ctx.stroke()
-      self.ctx.set_line_width(0.3)
-      self.setColor( self.params.get('minorGridLineColor',self.defaultMinorGridLineColor) )
 
-      # If this is the last label or we are using a log scale no minor grid line.
-      if self.secondYAxis:
-        if self.logBase or i == len(self.yLabelValuesL) - 1:
-          continue
-      else:
-        if self.logBase or i == len(self.yLabelValues) - 1:
-          continue
-        
-      # Draw the minor grid lines for linear scales.
-      if self.secondYAxis:
-        value += (self.yStepL / 2.0)
-        if value >= self.yTopL:
-          continue
-      else:
-        value += (self.yStep / 2.0)
-        if value >= self.yTop:
-          continue
+      # draw minor gridlines if this isn't the last label
+      if self.minorY >= 1 and i < (len(labels) - 1):
+        # in case graphite supports inverted Y axis now or someday
+        (valueLower, valueUpper) = sorted((value, labels[i+1]))
 
-      if self.secondYAxis:
-        y = self.getYCoord(value,"left")
-      else:
-        y = self.getYCoord(value)
-      if y is None or y < 0:
-          continue
+        # each minor gridline is 1/minorY apart from the nearby gridlines.
+        # we calculate that distance, for adding to the value in the loop.
+        distance = ((valueUpper - valueLower) / float(1 + self.minorY))
 
-      self.ctx.move_to(leftSide, y)
-      self.ctx.line_to(rightSide, y)
-      self.ctx.stroke()
+        # starting from the initial valueLower, we add the minor distance
+        # for each minor gridline that we wish to draw, and then draw it.
+        for minor in range(self.minorY):
+          self.ctx.set_line_width(0.3)
+          self.setColor( self.params.get('minorGridLineColor',self.defaultMinorGridLineColor) )
+
+          # the current minor gridline value is halfway between the current and next major gridline values
+          value = (valueLower + ((1+minor) * distance))
+
+          if self.logBase:
+            yTopFactor = self.logBase * self.logBase
+          else:
+            yTopFactor = 1
+
+          if self.secondYAxis:
+            if value >= (yTopFactor * self.yTopL):
+              continue
+          else:
+            if value >= (yTopFactor * self.yTop):
+              continue
+
+          if self.secondYAxis:
+            y = self.getYCoord(value,"left")
+          else:
+            y = self.getYCoord(value)
+          if y is None or y < 0:
+              continue
+
+          self.ctx.move_to(leftSide, y)
+          self.ctx.line_to(rightSide, y)
+          self.ctx.stroke()
 
     #Vertical grid lines
     top = self.area['ymin']
@@ -1352,6 +1559,10 @@ def frange(start,end,step):
   while f <= end:
     yield f
     f += step
+    # Protect against rounding errors on very small float ranges
+    if f == start:
+      yield end
+      return
 
 
 def toSeconds(t):
@@ -1359,19 +1570,19 @@ def toSeconds(t):
 
 
 def safeMin(args):
-  args = [arg for arg in args if arg is not None]
+  args = [arg for arg in args if arg not in (None, INFINITY)]
   if args:
     return min(args)
 
 
 def safeMax(args):
-  args = [arg for arg in args if arg is not None]
+  args = [arg for arg in args if arg not in (None, INFINITY)]
   if args:
     return max(args)
 
 
 def safeSum(values):
-  return sum([v for v in values if v is not None])
+  return sum([v for v in values if v not in (None, INFINITY)])
 
 
 def any(args):
@@ -1381,18 +1592,12 @@ def any(args):
   return False
 
 
-def reverse_sort(args):
-  aux_list = [arg for arg in args]
-  aux_list.reverse()
-  return aux_list
-
-def reverse_sort_stacked(series_list):
+def sort_stacked(series_list):
   stacked = [s for s in series_list if 'stacked' in s.options]
   not_stacked = [s for s in series_list if 'stacked' not in s.options]
-  stacked.reverse()
   return stacked + not_stacked
 
-def format_units(v, step, system="si"):
+def format_units(v, step=None, system="si"):
   """Format the given value in standardized units.
 
   ``system`` is either 'binary' or 'si'
@@ -1402,15 +1607,20 @@ def format_units(v, step, system="si"):
     http://en.wikipedia.org/wiki/Binary_prefix
   """
 
+  if step is None:
+    condition = lambda size: abs(v) >= size
+  else:
+    condition = lambda size: abs(v) >= size and step >= size
+
   for prefix, size in UnitSystems[system]:
-    if abs(v) >= size and step >= size:
+    if condition(size):
       v2 = v / size
-      if (v2 - int(v2)) < 0.00000000001 and v > 1:
-        v2 = int(v2)
+      if (v2 - math.floor(v2)) < 0.00000000001 and v > 1:
+        v2 = math.floor(v2)
       return v2, prefix
-  
-  if (v - int(v)) < 0.00000000001 and v > 1 :
-    v = int(v)
+
+  if (v - math.floor(v)) < 0.00000000001 and v > 1 :
+    v = math.floor(v)
   return v, ""
 
 

@@ -19,6 +19,8 @@ from django.conf import settings
 from graphite.account.models import Profile
 from graphite.util import getProfile, getProfileByUsername, defaultUser, json
 from graphite.logger import log
+import hashlib
+
 try:
   import cPickle as pickle
 except ImportError:
@@ -31,6 +33,7 @@ def header(request):
   context['user'] = request.user
   context['profile'] = getProfile(request)
   context['documentation_url'] = settings.DOCUMENTATION_URL
+  context['login_url'] = settings.LOGIN_URL
   return render_to_response("browserHeader.html", context)
 
 
@@ -132,7 +135,10 @@ def myGraphLookup(request):
         node.update(branchNode)
 
       else:
-        node.update( { 'id' : str(userpath_prefix + name), 'graphUrl' : str(graph.url) } )
+        m = hashlib.md5()
+        m.update(name)
+        md5 = m.hexdigest() 
+        node.update( { 'id' : str(userpath_prefix + md5), 'graphUrl' : str(graph.url) } )
         node.update(leafNode)
 
       nodes.append(node)
@@ -145,7 +151,7 @@ def myGraphLookup(request):
     no_graphs.update(leafNode)
     nodes.append(no_graphs)
 
-  return json_response(nodes)
+  return json_response(nodes, request)
 
 def userGraphLookup(request):
   "View for User Graphs navigation"
@@ -215,9 +221,13 @@ def userGraphLookup(request):
           }
           node.update(branchNode)
         else: # leaf
+          m = hashlib.md5()
+          m.update(nodeName)
+          md5 = m.hexdigest() 
+
           node = {
-            'text' : str(nodeName),
-            'id' : str(username + '.' + prefix + nodeName),
+            'text' : str(nodeName ),
+            'id' : str(username + '.' + prefix + md5),
             'graphUrl' : str(graph.url),
           }
           node.update(leafNode)
@@ -232,13 +242,20 @@ def userGraphLookup(request):
     no_graphs.update(leafNode)
     nodes.append(no_graphs)
 
-  return json_response(nodes)
+  return json_response(nodes, request)
 
 
-def json_response(nodes):
+def json_response(nodes, request=None):
+  if request:
+    jsonp = request.REQUEST.get('jsonp', False)
+  else:
+    jsonp = False
   #json = str(nodes) #poor man's json encoder for simple types
   json_data = json.dumps(nodes)
-  response = HttpResponse(json_data,mimetype="application/json")
+  if jsonp:
+    response = HttpResponse("%s(%s)" % (jsonp, json_data),mimetype="text/javascript")
+  else:
+    response = HttpResponse(json_data,mimetype="application/json")
   response['Pragma'] = 'no-cache'
   response['Cache-Control'] = 'no-cache'
   return response

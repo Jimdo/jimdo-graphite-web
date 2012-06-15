@@ -131,7 +131,11 @@ def find_view(request):
           query_parts[i] = '{%s}' % part
       query = '.'.join(query_parts)
 
-  matches = list( store.find(query) )
+  try:
+    matches = list( store.find(query) )
+  except:
+    log.exception()
+    raise
 
   log.info('find_view query=%s local_only=%s matches=%d' % (query, local_only, len(matches)))
   matches.sort(key=lambda node: node.name)
@@ -280,7 +284,8 @@ def tree_json(nodes, base_path, wildcards=False, contexts=False):
     results.append(wildcardNode)
 
   found = set()
-
+  results_leaf = []
+  results_branch = []
   for node in nodes: #Now let's add the matching children
     if node.name in found:
       continue
@@ -298,20 +303,22 @@ def tree_json(nodes, base_path, wildcards=False, contexts=False):
 
     if node.isLeaf():
       resultNode.update(leafNode)
+      results_leaf.append(resultNode)
     else:
       resultNode.update(branchNode)
+      results_branch.append(resultNode)
 
-    results.append(resultNode)
-
+  results.extend(results_branch)
+  results.extend(results_leaf)
   return json.dumps(results)
 
 
 def pickle_nodes(nodes, contexts=False):
   if contexts:
-    return pickle.dumps([ { 'metric_path' : n.metric_path, 'isLeaf' : n.isLeaf(), 'intervals' : n.intervals, 'context' : n.context } for n in nodes ])
+    return pickle.dumps([ { 'metric_path' : n.metric_path, 'isLeaf' : n.isLeaf(), 'intervals' : n.getIntervals(), 'context' : n.context } for n in nodes ])
 
   else:
-    return pickle.dumps([ { 'metric_path' : n.metric_path, 'isLeaf' : n.isLeaf(), 'intervals' : n.intervals} for n in nodes ])
+    return pickle.dumps([ { 'metric_path' : n.metric_path, 'isLeaf' : n.isLeaf(), 'intervals' : n.getIntervals()} for n in nodes ])
 
 
 def any(iterable): #python2.4 compatibility

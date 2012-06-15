@@ -333,11 +333,6 @@ function saveMyGraph(button, e) {
 	return;
       }
 
-      if (text.search(/[^A-Za-z0-9_.]/) != -1) {
-        Ext.Msg.alert("Graph names can only contain letters, numbers, underscores, or periods.");
-        return;
-      }
-
       if (text.charAt(text.length - 1) == '.') {
         Ext.Msg.alert("Graph names cannot end in a period.");
         return;
@@ -565,9 +560,6 @@ var GraphDataWindow = {
         function (target) {
           var newTarget;
 
-          Composer.url.removeParam('target', target);
-          removeTarget(target);
-
           if (extraArg) {
             if (funcName == 'mostDeviant') { //SPECIAL CASE HACK
               newTarget = funcName + '(' + extraArg + ',' + target + ')';
@@ -578,11 +570,11 @@ var GraphDataWindow = {
             newTarget = funcName + '(' + target + ')';
           }
 
-          Composer.url.addParam('target', newTarget);
-          addTarget(newTarget);
+          replaceTarget(target, newTarget);
           _this.targetList.select( TargetStore.findExact('value', newTarget), true);
         }
       );
+      Composer.syncTargetList();
       Composer.updateImage();
     }
     return applyFunc;
@@ -617,18 +609,21 @@ var GraphDataWindow = {
   applyFuncToAll: function (funcName) {
     function applyFunc() {
       var args = this.getSelectedTargets().join(',');
+      var oldTargets = this.getSelectedTargets();
+      var firstTarget = oldTargets.shift();
       var newTarget = funcName + '(' + args + ')';
 
-      Ext.each(this.getSelectedTargets(),
+      // Insert new target where the first selected was
+      replaceTarget(firstTarget,newTarget);
+
+      Ext.each(oldTargets,
         function (target) {
-	  Composer.url.removeParam('target', target);
           removeTarget(target);
         }
       );
-      Composer.url.addParam('target', newTarget);
+      Composer.syncTargetList();
       Composer.updateImage();
 
-      addTarget(newTarget);
       this.targetList.select( TargetStore.findExact('value', newTarget), true);
     }
     applyFunc = applyFunc.createDelegate(this);
@@ -652,7 +647,9 @@ var GraphDataWindow = {
         for (i = 0; i < argString.length; i++) {
           switch (argString.charAt(i)) {
             case '(': depth += 1; break;
+            case '{': depth += 1; break;
             case ')': depth -= 1; break;
+            case '}': depth -= 1; break;
             case ',':
               if (depth > 0) { continue; }
               if (depth < 0) { Ext.Msg.alert("Malformed target, cannot remove outer call."); return; }
@@ -663,16 +660,17 @@ var GraphDataWindow = {
         }
         args.push( argString.substring(lastArg, i) );
 
-        Composer.url.removeParam('target', target);
+        var firstIndex = indexOfTarget(target);
         removeTarget(target);
 
+        args.reverse()
         Ext.each(args, function (arg) {
-          if (!arg.match(/^([0123456789\.]+|".+")$/)) { //Skip string and number literals
-            Composer.url.addParam('target', arg);
-            addTarget(arg);
+          if (!arg.match(/^([0123456789\.]+|".+"|'.*')$/)) { //Skip string and number literals
+            insertTarget(firstIndex, arg);
             _this.targetList.select( TargetStore.findExact('value', arg), true);
           }
         });
+        Composer.syncTargetList();
         Composer.updateImage();
       }
     );
@@ -688,9 +686,9 @@ var GraphDataWindow = {
         specialkey: function (field, e) {
                       if (e.getKey() == e.ENTER) {
                         var target = metricCompleter.getValue();
-                        Composer.url.addParam('target', target);
-                        Composer.updateImage();
                         addTarget(target);
+                        Composer.syncTargetList();
+                        Composer.updateImage();
                         win.close();
                         e.stopEvent();
                         return false;
@@ -724,9 +722,9 @@ var GraphDataWindow = {
           text: 'OK',
           handler: function () {
                      var target = metricCompleter.getValue();
-                     Composer.url.addParam('target', target);
-                     Composer.updateImage();
                      addTarget(target);
+                     Composer.syncTargetList();
+                     Composer.updateImage();
                      win.close();
                    }
         }, {
@@ -743,14 +741,11 @@ var GraphDataWindow = {
   },
 
   removeTarget: function (item, e) {
-    var targets = Composer.url.getParamList('target');
 
     Ext.each(this.getSelectedTargets(), function (target) {
-      targets.remove(target);
       removeTarget(target);
     });
-
-    Composer.url.setParamList('target', targets);
+    Composer.syncTargetList();
     Composer.updateImage();
   },
 
@@ -778,10 +773,10 @@ var GraphDataWindow = {
                       if (e.getKey() == e.ENTER) {
                         var target = metricCompleter.getValue();
 
-                        Composer.url.removeParam('target', record.get('value'));
-                        Composer.url.addParam('target', target);
-                        Composer.updateImage();
                         record.set('value', target);
+                        record.commit();
+                        Composer.syncTargetList();
+                        Composer.updateImage();
 
                         win.close();
                         e.stopEvent();
@@ -798,12 +793,11 @@ var GraphDataWindow = {
       var newValue = metricCompleter.getValue();
 
       if (newValue != '') {
-        Composer.url.removeParam('target', record.get('value'));
-        Composer.url.addParam('target', newValue);
-        Composer.updateImage();
-
         record.set('value', newValue);
         record.commit();
+
+        Composer.syncTargetList();
+        Composer.updateImage();
       }
 
       win.close();
@@ -887,19 +881,24 @@ function createFunctionsMenu() {
       menu: [
         {text: 'Sum', handler: applyFuncToAll('sumSeries')},
         {text: 'Average', handler: applyFuncToAll('averageSeries')},
+        {text: 'Product', handler: applyFuncToAll('multiplySeries')},
         {text: 'Min Values', handler: applyFuncToAll('minSeries')},
         {text: 'Max Values', handler: applyFuncToAll('maxSeries')},
-        {text: 'Group', handler: applyFuncToAll('group')}
+        {text: 'Group', handler: applyFuncToAll('group')},
+        {text: 'Range', handler: applyFuncToAll('rangeOfSeries')}
       ]
     }, {
       text: 'Transform',
       menu: [
         {text: 'Scale', handler: applyFuncToEachWithInput('scale', 'Please enter a scale factor')},
+        {text: 'ScaleToSeconds', handler: applyFuncToEachWithInput('scaleToSeconds', 'Please enter a number of seconds to scale to')},
         {text: 'Offset', handler: applyFuncToEachWithInput('offset', 'Please enter the value to offset Y-values by')},
         {text: 'Derivative', handler: applyFuncToEach('derivative')},
         {text: 'Integral', handler: applyFuncToEach('integral')},
+        {text: 'Percentile Values', handler: applyFuncToEachWithInput('percentileOfSeries', "Please enter the percentile to use")},
         {text: 'Non-negative Derivative', handler: applyFuncToEachWithInput('nonNegativeDerivative', "Please enter a maximum value if this metric is a wrapping counter (or just leave this blank)", {allowBlank: true})},
         {text: 'Log', handler: applyFuncToEachWithInput('log', 'Please enter a base')},
+        {text: 'Absolute Value', handler: applyFuncToEach('absolute')},
         {text: 'timeShift', handler: applyFuncToEachWithInput('timeShift', 'Shift this metric ___ back in time (examples: 10min, 7d, 2w)', {quote: true})},
         {text: 'Summarize', handler: applyFuncToEachWithInput('summarize', 'Please enter a summary interval (examples: 10min, 1h, 7d)', {quote: true})},
         {text: 'Hit Count', handler: applyFuncToEachWithInput('hitcount', 'Please enter a summary interval (examples: 10min, 1h, 7d)', {quote: true})}
@@ -908,17 +907,27 @@ function createFunctionsMenu() {
       text: 'Calculate',
       menu: [
         {text: 'Moving Average', handler: applyFuncToEachWithInput('movingAverage', 'Moving average for the last ___ data points')},
+        {text: 'Moving Median', handler: applyFuncToEachWithInput('movingMedian', 'Moving median for the last ___ data points')},
         {text: 'Moving Standard Deviation', handler: applyFuncToEachWithInput('stdev', 'Moving standard deviation for the last ___ data points')},
-        {text: 'Holt-Winters Forecast', handler: this.applyFuncToEach('holtWintersForecast')},
-        {text: 'Holt-Winters Confidence Bands', handler: this.applyFuncToEach('holtWintersConfidenceBands')},
-        {text: 'Holt-Winters Aberration', handler: this.applyFuncToEach('holtWintersAberration')},
-        {text: 'As Percent', handler: applyFuncToEachWithInput('asPercent', 'Please enter the value that corresponds to 100%')},
+        {text: 'Holt-Winters Forecast', handler: applyFuncToEach('holtWintersForecast')},
+        {text: 'Holt-Winters Confidence Bands', handler: applyFuncToEach('holtWintersConfidenceBands')},
+        {text: 'Holt-Winters Aberration', handler: applyFuncToEach('holtWintersAberration')},
+        {text: 'As Percent', handler: applyFuncToEachWithInput('asPercent', 'Please enter the value that corresponds to 100% or leave blank to use the total', {allowBlank: true})},
         {text: 'Difference (of 2 series)', handler: applyFuncToAll('diffSeries')},
         {text: 'Ratio (of 2 series)', handler: applyFuncToAll('divideSeries')}
       ]
     }, {
       text: 'Filter',
       menu: [
+        {
+          text: 'Data Filters',
+          menu: [
+            {text: 'Remove Above Value', handler: applyFuncToEachWithInput('removeAboveValue', 'Set any values above ___ to None')},
+            {text: 'Remove Above Percentile', handler: applyFuncToEachWithInput('removeAbovePercentile', 'Set any values above the ___th percentile to None')},
+            {text: 'Remove Below Value', handler: applyFuncToEachWithInput('removeAboveValue', 'Set any values above ___ to None')},
+            {text: 'Remove Below Percentile', handler: applyFuncToEachWithInput('removeAbovePercentile', 'Set any values above the ___th percentile to None')}
+          ]
+        },
         {text: 'Most Deviant', handler: applyFuncToEachWithInput('mostDeviant', 'Draw the ___ metrics with the highest standard deviation')},
         {text: 'Highest Current Value', handler: applyFuncToEachWithInput('highestCurrent', 'Draw the ___ metrics with the highest current value')},
         {text: 'Lowest Current Value', handler: applyFuncToEachWithInput('lowestCurrent', 'Draw the ___ metrics with the lowest current value')},
@@ -932,6 +941,7 @@ function createFunctionsMenu() {
         {text: 'Average Value Below', handler: applyFuncToEachWithInput('averageBelow', 'Draw all metrics whose average value is below ___')},
         {text: 'Maximum Value Above', handler: applyFuncToEachWithInput('maximumAbove', 'Draw all metrics whose maximum value is above ___')},
         {text: 'Maximum Value Below', handler: applyFuncToEachWithInput('maximumBelow', 'Draw all metrics whose maximum value is below ___')},
+        {text: 'Minimum Value Above', handler: applyFuncToEachWithInput('minimumAbove', 'Draw all metrics whose minimum value is above ___')},
         {text: 'sortByMaxima', handler: applyFuncToEach('sortByMaxima')},
         {text: 'sortByMinima', handler: applyFuncToEach('sortByMinima')},
         {text: 'limit', handler: applyFuncToEachWithInput('limit', 'Limit to first ___ of a list of metrics')},
@@ -941,8 +951,11 @@ function createFunctionsMenu() {
       text: 'Special',
       menu: [
         {text: 'Set Legend Name', handler: applyFuncToEachWithInput('alias', 'Enter a legend label for this graph target', {quote: true})},
-        {text: 'Add Value to Legend Name',
+        {text: 'Set Legend Name By Metric', handler: applyFuncToEach('aliasByMetric')},
+        {text: 'Set Legend Name By Node', handler: applyFuncToEachWithInput('aliasByNode', 'Enter the 0-indexed node to display')},
+        {text: 'Add Values to Legend Name',
 	      	 menu: [
+                        {text: "Cacti Style Legend", handler: applyFuncToEach('cactiStyle')},
         		{text: "Last Value", handler: applyFuncToEach('legendValue', '"last"')},
         		{text: "Average Value", handler: applyFuncToEach('legendValue', '"avg"')},
         		{text: "Total Value", handler: applyFuncToEach('legendValue', '"total"')},
@@ -950,13 +963,18 @@ function createFunctionsMenu() {
         		{text: "Max Value", handler: applyFuncToEach('legendValue', '"max"')}
         		]},
         {text: 'Color', handler: applyFuncToEachWithInput('color', 'Set the color for this graph target', {quote: true})},
+        {text: 'Alpha', handler: applyFuncToEachWithInput('alpha', 'Set the alpha (transparency) for this graph target (between 0.0 and 1.0)')},
         {text: 'Aggregate By Sum', handler: applyFuncToEach('cumulative')},
         {text: 'Draw non-zero As Infinite', handler: applyFuncToEach('drawAsInfinite')},
         {text: 'Line Width', handler: applyFuncToEachWithInput('lineWidth', 'Please enter a line width for this graph target')},
         {text: 'Dashed Line', handler: applyFuncToEach('dashed')},
         {text: 'Keep Last Value', handler: applyFuncToEach('keepLastValue')},
+        {text: 'Transform Nulls', handler: applyFuncToEachWithInput('transformNull', 'Please enter the value to transform null values to')},
         {text: 'Substring', handler: applyFuncToEachWithInput('substr', 'Enter a starting position')},
-        {text: 'Add Threshold Line', handler: applyFuncToEachWithInput('threshold', 'Enter a threshold value')},
+        {text: 'Group', handler: applyFuncToAll('group')},
+        {text: 'Area Between', handler: applyFuncToEach('areaBetween')},
+//        {text: 'GroupByNode', handler: applyFuncToEachWithInput('group')}, // requires 2 parameters
+//        {text: 'Add Threshold Line', handler: applyFuncToEachWithInput('threshold', 'Enter a threshold value')},
         {text: 'Draw Stacked', handler: applyFuncToEach('stacked')},
         {text: 'Draw in Second Y Axis', handler: applyFuncToEach('secondYAxis')}
       ]
@@ -992,20 +1010,81 @@ function toggleAutoRefresh(button, pressed) {
 
 /* Display Options Menu */
 function createOptionsMenu() {
-  var fontMenu = new Ext.menu.Menu({
+  var yAxisUnitMenu = new Ext.menu.Menu({
     items: [
-      {text: "Color", menu: createColorMenu('fgcolor')},
-      menuInputItem("Size", "fontSize"),
-      {text: "Face", menu: createFontFacesMenu()},
-      menuCheckItem("Italics", "fontItalic"),
-      menuCheckItem("Bold", "fontBold")
+      menuRadioItem("yUnit", "Standard", "yUnitSystem", "si"),
+      menuRadioItem("yUnit", "Binary", "yUnitSystem", "binary"),
+      menuRadioItem("yUnit", "None", "yUnitSystem", "none")
+      
+    ]
+  });
+  var yAxisSideMenu = new Ext.menu.Menu({
+    items: [
+      menuRadioItem("yAxis", "Left", "yAxisSide", "left"),
+      menuRadioItem("yAxis", "Right", "yAxisSide", "right")
+    ]
+  });
+
+  var yAxisLeftMenu = new Ext.menu.Menu({
+    items: [
+      menuInputItem("Left Y Label", "vtitle"),
+      menuInputItem("Left Y Minimum", "yMinLeft"),
+      menuInputItem("Left Y Maximum", "yMaxLeft"),
+      menuInputItem("Left Y Limit", "yLimitLeft"),
+      menuInputItem("Left Y Step", "yStepLeft"),
+      menuInputItem("Left Line Width", "leftWidth"),
+      menuInputItem("Left Line Color", "leftColor"),
+      menuInputItem("Left Line Dashed (length, in px)", "leftDashed")
+    
+    ]
+  });
+  var yAxisRightMenu = new Ext.menu.Menu({
+    items: [
+      menuInputItem("Right Y Label", "vtitleRight"),
+      menuInputItem("Right Y Minimum", "yMinRight"),
+      menuInputItem("Right Y Maximum", "yMaxRight"),
+      menuInputItem("Right Y Limit", "yLimitRight"),
+      menuInputItem("Right Y Step", "yStepRight"),
+      menuInputItem("Right Line Width", "rightWidth"),
+      menuInputItem("Right Line Color", "rightColor"),
+      menuInputItem("Right Line Dashed (length, in px)", "rightDashed")
+    
+    ]
+  });
+
+  var SecondYAxisMenu = new Ext.menu.Menu({
+    items: [
+      {text: "Left Y-Axis", menu: yAxisLeftMenu},
+      {text: "Right Y-Axis", menu: yAxisRightMenu}
+    ]
+  });
+
+  var yAxisMenu = new Ext.menu.Menu({
+    items: [
+      menuInputItem("Label", "vtitle"),
+      menuInputItem("Minimum", "yMin"),
+      menuInputItem("Maximum", "yMax"),
+      menuInputItem("Minor Lines", "minorY", "Enter the number of minor lines to draw", /^[a-zA-Z]/),
+      menuInputItem("Logarithmic Scale", "logBase", "Enter the logarithmic base to use (ie. 10, e, etc...)"),
+      {text: "Unit", menu: yAxisUnitMenu},
+      {text: "Side", menu: yAxisSideMenu},
+      {text: "Dual Y-Axis Options", menu: SecondYAxisMenu},
+      menuHelpItem("Dual Y-Axis Help", "To select metrics to associate with the second (right-side) y-axis, go into the Graph Data dialog box, highlight a metric, click Apply Functions, Special, Second Y Axis.")
+    ]
+  });
+
+  var xAxisMenu = new Ext.menu.Menu({
+    items: [
+      menuInputItem("Time Format", "xFormat", "Enter the time format (see Python's datetime.strftime())", /^$/),
+      menuInputItem("Timezone", "tz", "Enter the timezone to display (e.g. UTC or America/Chicago)"),
+      menuInputItem("Point-width Consolidation Threshold", "minXStep", "Enter the closest number of pixels between points before consolidation"),
     ]
   });
 
   var areaMenu = new Ext.menu.Menu({
     items: [
-      menuRadioItem("area","None", "areaMode", ""),
-      menuRadioItem("area","First Only", "areaMode", "first"),
+      menuRadioItem("area", "None", "areaMode", ""),
+      menuRadioItem("area", "First Only", "areaMode", "first"),
       menuRadioItem("area", "Stacked", "areaMode", "stacked"),
       menuRadioItem("area", "All", "areaMode", "all")
     ]
@@ -1019,97 +1098,77 @@ function createOptionsMenu() {
         menuCheckItem("Draw Null as Zero", "drawNullAsZero")
     ]
   });
-  
-  var displayMenu = new Ext.menu.Menu({
+
+  var fontFacesMenu = new Ext.menu.Menu({
     items: [
-      menuCheckItem("Graph Only", "graphOnly"),
-      menuCheckItem("Hide Axes", "hideAxes"),
-      menuCheckItem("Hide Grid", "hideGrid"),
+      menuRadioItem("fontFace", "Sans", "fontName", "Sans"),
+      menuRadioItem("fontFace", "Times", "fontName", "Times"),
+      menuRadioItem("fontFace", "Courier", "fontName", "Courier"),
+      menuRadioItem("fontFace", "Helvetica", "fontName", "Helvetica")
+    ] 
+  });
+
+  var fontMenu = new Ext.menu.Menu({
+    items: [
+      {text: "Face", menu: fontFacesMenu},
       {
-        text: 'Graph Legend',
+        text: "Style",
         menu: {
           items: [
-            menuRadioItem('legend', 'Hide If Too Many', 'hideLegend'),
-            menuRadioItem('legend', 'Always Hide', 'hideLegend', 'true'),
-            menuRadioItem('legend', 'Never Hide', 'hideLegend', 'false')
+            menuCheckItem("Italics", "fontItalic"),
+            menuCheckItem("Bold", "fontBold"),
           ]
         }
-      }
+      },
+      menuInputItem("Size", "fontSize", "Enter the font size in pt"),
+      {text: "Color", menu: createColorMenu('fgcolor')}
     ]
   });
 
-  var yAxisUnitMenu = new Ext.menu.Menu({
+  var displayMenu = new Ext.menu.Menu({
     items: [
-      menuRadioItem("yUnit", "Standard", "yUnitSystem", "si"),
-      menuRadioItem("yUnit", "Binary", "yUnitSystem", "binary"),
-      menuRadioItem("yUnit", "None", "yUnitSystem", "none")
-      
-    ]
-  });
-  var yAxisSideMenu = new Ext.menu.Menu({
-    items: [
-      menuRadioItem("yAxis", "Left", "yAxisSide", "left"),
-      menuRadioItem("yAxis", "Right", "yAxisSide", "right"),
-    ]
-  });
-
-  var yAxisMenu = new Ext.menu.Menu({
-    items: [
-      menuInputItem("Label", "vtitle"),
-      menuInputItem("Minimum", "yMin"),
-      menuInputItem("Maximum", "yMax"),
-      menuInputItem("Logarithmic Scale", "logBase", "Please enter the logarithmic base to use (ie. 10, e, etc...)"),
-      {text: "Unit", menu: yAxisUnitMenu},
-      {text: "Side", menu: yAxisSideMenu},
-      
-      menuHelpItem("Second Y Axis", "To select metrics to associate with the second (right-side) y-axis, go into the Graph Data dialog box, highlight a metric, click Apply Functions, Special, Second Y Axis.")
-    ]
-  });
-  var yAxisLeftMenu = new Ext.menu.Menu({
-    items: [
-      menuInputItem("Left Y Minimum", "yMinLeft"),
-      menuInputItem("Left Y Maximum", "yMaxLeft"),
-      menuInputItem("Left Y Limit", "yLimitLeft"),
-      menuInputItem("Left Y Step", "yStepLeft"),
-      menuInputItem("Left Line Width", "leftWidth"),
-      menuInputItem("Left Line Color", "leftColor"),
-      menuInputItem("Left Line Dashed (length, in px)", "leftDashed"),
-    
-    ]
-  });
-  var yAxisRightMenu = new Ext.menu.Menu({
-    items: [
-      menuInputItem("Right Y Minimum", "yMinRight"),
-      menuInputItem("Right Y Maximum", "yMinRight"),
-      menuInputItem("Right Y Limit", "yLimitRight"),
-      menuInputItem("Right Y Step", "yStepRight"),
-      menuInputItem("Right Line Width", "rightWidth"),
-      menuInputItem("Right Line Color", "rightColor"),
-      menuInputItem("Right Line Dashed (length, in px)", "rightDashed"),
-    
-    ]
-  });
-
-  var SecondYAxisMenu = new Ext.menu.Menu({
-    items: [
-      {text: "Left Y Axis", menu: yAxisLeftMenu},
-      {text: "Right Y Axis", menu: yAxisRightMenu}
+      {text: "Font", menu: fontMenu},
+      {
+        text: "Color",
+        menu: {
+          items: [
+            menuInputItem("Line Colors", "colorList", "Enter an ordered list of comma-separated colors (name or hex values)", /^$/),
+            {text: "Background", menu: createColorMenu('bgcolor')},
+            {text: "Major Grid Line", menu: createColorMenu('majorGridLineColor')},
+            {text: "Minor Grid Line", menu: createColorMenu('minorGridLineColor')},
+            menuInputItem("Filled Area Alpha Value", "areaAlpha", "Enter the alpha value (between 0.0 and 1.0)")
+          ]
+        }
+      },
+      {
+        text: "Graph Legend",
+        menu: {
+          items: [
+            menuRadioItem("legend", "Hide If Too Many", "hideLegend"),
+            menuRadioItem("legend", "Always Hide", "hideLegend", "true"),
+            menuRadioItem("legend", "Never Hide", "hideLegend", "false"),
+            menuCheckItem("Hide Duplicate Items", "uniqueLegend")
+          ]
+        }
+      },
+      menuInputItem("Line Thickness", "lineWidth", "Enter the line thickness in pixels"),
+      menuCheckItem("Graph Only", "graphOnly"),
+      menuCheckItem("Hide Axes", "hideAxes"),
+      menuCheckItem("Hide Y-Axis", "hideYAxis"),
+      menuCheckItem("Hide Grid", "hideGrid"),
+      menuInputItem("Apply Template", "template", "Enter the name of a template defined in graphTemplates.conf", /^$/),
     ]
   });
 
   return {
     xtype: 'menu',
     items: [
-      menuInputItem("Graph Title", "title"),
-      {text: "Y Axis", menu: yAxisMenu},
-      {text: "Left/Right Y Axis Options", menu: SecondYAxisMenu},
-      menuInputItem("Line Thickness", "lineWidth"),
-      {text: "Area Mode", menu: areaMenu},
-      {text: "Line Mode", menu: lineMenu},
-      menuCheckItem("Alpha Masking", "template", "alphas"),
-      {text: "Canvas Color", menu: createColorMenu('bgcolor')},
+      menuInputItem("Graph Title", "title", "Graph Title", /^$/),
       {text: "Display", menu: displayMenu},
-      {text: "Font", menu: fontMenu}
+      {text: "Line Mode", menu: lineMenu},
+      {text: "Area Mode", menu: areaMenu},
+      {text: "X-Axis", menu: xAxisMenu},
+      {text: "Y-Axis", menu: yAxisMenu}
     ]
   };
 }
@@ -1132,24 +1191,6 @@ function removeParam(param) {
 }
 /* End of Graph Options API */
 
-function createFontFacesMenu() {
-  var faces = ["Times", "Courier", "Sans", "Helvetica"];
-  var menuItems = [];
-
-  Ext.each(faces,
-    function (face) {
-      menuItems.push({
-        text: face,
-        handler: function (menuItem, e) {
-                   setParam("fontName", face);
-                   updateGraph();
-                 }
-      });
-    }
-  );
-  return new Ext.menu.Menu({items: menuItems});
-}
-
 function createColorMenu(param) {
   var colorPicker = new Ext.menu.ColorMenu({hideOnClick: false});
   colorPicker.on('select',
@@ -1161,21 +1202,26 @@ function createColorMenu(param) {
   return colorPicker;
 }
 
-function menuInputItem(name, param, question) {
-  return new Ext.menu.Item({text: name, handler: paramPrompt(question || name, param)});
+function menuInputItem(name, param, question, regexp) {
+  return new Ext.menu.Item({text: name, handler: paramPrompt(question || name, param, regexp)});
 }
 
 function menuHelpItem(name, message) {
-  return new Ext.menu.Item({text: name, handler: helpMessage('FYI', message)});
+  return new Ext.menu.Item({text: name, handler: helpMessage(name, message)});
 }
 
-function paramPrompt(question, param) {
+function paramPrompt(question, param, regexp) {
+
+  if(regexp == null) {
+    regexp = /[^A-Za-z0-9_.]/;
+  }
+
   return function (menuItem, e) {
     Ext.MessageBox.prompt(
       "Input Required",
       question,
       function (button, value) {
-        if (value.search(/[^A-Za-z0-9_.]/) != -1) {
+        if (value.search(regexp) != -1) {
           Ext.Msg.alert("Input can only contain letters, numbers, underscores, or periods.");
           return;
         }

@@ -13,9 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License."""
 
 from datetime import datetime,timedelta
+from time import daylight
+from django.conf import settings
+
+try: # See if there is a system installation of pytz first
+  import pytz
+except ImportError: # Otherwise we fall back to Graphite's bundled version
+  from graphite.thirdparty import pytz
+
 
 months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec']
 weekdays = ['sun','mon','tue','wed','thu','fri','sat']
+
+tzinfo = pytz.timezone(settings.TIME_ZONE)
 
 def parseATTime(s):
   s = s.strip().lower().replace('_','').replace(',','').replace(' ','')
@@ -23,7 +33,7 @@ def parseATTime(s):
     if len(s) == 8 and int(s[:4]) > 1900 and int(s[4:6]) < 13 and int(s[6:]) < 32:
       pass #Fall back because its not a timestamp, its YYYYMMDD form
     else:
-      return datetime.fromtimestamp( int(s) )
+      return datetime.fromtimestamp(int(s),tzinfo)
   if '+' in s:
     ref,offset = s.split('+',1)
     offset = '+' + offset
@@ -32,7 +42,7 @@ def parseATTime(s):
     offset = '-' + offset
   else:
     ref,offset = s,''
-  return parseTimeReference(ref) + parseTimeOffset(offset)
+  return tzinfo.localize(parseTimeReference(ref), daylight) + parseTimeOffset(offset)
 
 
 def parseTimeReference(ref):
