@@ -1,0 +1,13 @@
+Index: graphite-web/webapp/graphite/settings.py
+===================================================================
+--- graphite-web.orig/webapp/graphite/settings.py	2012-06-15 11:49:11.000000000 +0200
++++ graphite-web/webapp/graphite/settings.py	2012-06-15 12:38:35.000000000 +0200
+@@ -39,7 +39,7 @@
+ CONF_DIR = ''
+ DASHBOARD_CONF = ''
+ GRAPHTEMPLATES_CONF = ''
+-STORAGE_DIR = ''
++STORAGE_DIR = '/var/lib/carbon'
+ WHITELIST_FILE = ''
+ INDEX_FILE = ''
+ LOG_DIR = ''

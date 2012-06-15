@@ -1,3 +1,9 @@
+graphite-web (0.9.10-2) unstable; urgency=low
+
+  * Patch settings.py to use correct carbon storage path
+
+ -- Lars Fronius <lars@jimdo.com>  Thu, 15 Jun 2012 12:39:22 +0100
+
 graphite-web (0.9.10-1) unstable; urgency=low
 
   * Upgrade graphite-web to release 0.9.10
